@@ -582,6 +582,7 @@ let centerMarker = null;
 let radiusCircle = null;
 let resultsLayer = L.featureGroup().addTo(map);
 let centerLatLon = null;
+let userHasSetCenter = false;
 
 function dotIcon(color) {
   return L.divIcon({
@@ -594,7 +595,16 @@ function dotIcon(color) {
 
 const sizeColors = { small: '#f1c40f', medium: '#e67e22', big: '#e74c3c' };
 
+function clearSearchOverlay() {
+  userHasSetCenter = false;
+  centerLatLon = null;
+  if (centerMarker) { map.removeLayer(centerMarker); centerMarker = null; }
+  if (radiusCircle) { map.removeLayer(radiusCircle); radiusCircle = null; }
+  document.getElementById('coords-display').textContent = 'No center set';
+}
+
 function setSearchCenter(latlng) {
+  userHasSetCenter = true;
   centerLatLon = latlng;
   document.getElementById('coords-display').textContent =
     `${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}`;
@@ -622,7 +632,7 @@ map.on('click', function(e) {
 document.getElementById('radius').addEventListener('input', updateCircle);
 
 function updateCircle() {
-  if (!centerLatLon) return;
+  if (!userHasSetCenter || !centerLatLon) return;
   const r = parseFloat(document.getElementById('radius').value) * 1000;
   if (radiusCircle) map.removeLayer(radiusCircle);
   radiusCircle = L.circle(centerLatLon, {
@@ -696,6 +706,7 @@ function renderResults(fc, opts = {}) {
 }
 
 async function loadDefaultResults() {
+  clearSearchOverlay();
   try {
     const params = new URLSearchParams({
       lat: DEFAULT_LAT,
