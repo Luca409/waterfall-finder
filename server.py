@@ -505,15 +505,39 @@ HTML = """<!DOCTYPE html>
     .wf-popup b { font-size: 1rem; }
     .wf-popup .stat { color: #555; font-size: 0.85rem; margin-top: 2px; }
     .hint { font-size: 0.78rem; color: #aaa; white-space: nowrap; }
+    #welcome-modal {
+      display: none; position: fixed; inset: 0; z-index: 2000;
+      background: rgba(0, 0, 0, 0.55); align-items: center; justify-content: center;
+    }
+    #welcome-modal.open { display: flex; }
+    #welcome-modal .dialog {
+      background: #fff; color: #222; max-width: 420px; margin: 16px;
+      padding: 24px 28px; border-radius: 10px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+    }
+    #welcome-modal h2 { font-size: 1.15rem; margin-bottom: 10px; }
+    #welcome-modal p { font-size: 0.95rem; line-height: 1.5; color: #444; }
+    #welcome-modal button {
+      margin-top: 18px; padding: 8px 20px; background: #4f8ef7; color: #fff;
+      border: none; border-radius: 5px; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+    }
+    #welcome-modal button:hover { background: #3a7ae0; }
   </style>
 </head>
 <body>
+<div id="welcome-modal" class="open">
+  <div class="dialog">
+    <h2>Welcome</h2>
+    <p>Click anywhere on the map and then search to find waterfalls.</p>
+    <button type="button" onclick="closeWelcomeModal()">Got it</button>
+  </div>
+</div>
 <div id="toolbar">
   <h1>💧 Waterfall Finder</h1>
   <span class="hint">Click map to set center</span>
   <span id="coords-display">No center set</span>
   <label>Radius (km)
-    <input type="number" id="radius" value="15" min="1" max="100" step="1"/>
+    <input type="number" id="radius" value="30" min="1" max="100" step="1"/>
   </label>
   <button id="search-btn" onclick="doSearch()">Search</button>
   <span id="status"></span>
@@ -528,7 +552,11 @@ HTML = """<!DOCTYPE html>
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-const map = L.map('map').setView([42.7, -74.4], 10);
+const DEFAULT_LAT = 42.42457;
+const DEFAULT_LON = -74.40353;
+const DEFAULT_RADIUS_KM = 30;
+
+const map = L.map('map').setView([DEFAULT_LAT, DEFAULT_LON], 11);
 
 L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenTopoMap contributors',
@@ -551,22 +579,32 @@ function dotIcon(color) {
 
 const sizeColors = { small: '#f1c40f', medium: '#e67e22', big: '#e74c3c' };
 
-map.on('click', function(e) {
-  centerLatLon = e.latlng;
+function setSearchCenter(latlng) {
+  centerLatLon = latlng;
   document.getElementById('coords-display').textContent =
-    `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
+    `${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}`;
 
   if (centerMarker) map.removeLayer(centerMarker);
-  centerMarker = L.marker(e.latlng, {
+  centerMarker = L.marker(latlng, {
     icon: L.divIcon({
       className: '',
       html: '<div style="width:18px;height:18px;border-radius:50%;background:#fff;border:3px solid #333;box-shadow:0 1px 4px rgba(0,0,0,.6)"></div>',
       iconSize: [18, 18], iconAnchor: [9, 9],
     })
-  }).addTo(map).bindPopup('Search center').openPopup();
+  }).addTo(map).bindPopup('Search center');
 
   updateCircle();
+}
+
+function closeWelcomeModal() {
+  document.getElementById('welcome-modal').classList.remove('open');
+}
+
+map.on('click', function(e) {
+  setSearchCenter(e.latlng);
 });
+
+setSearchCenter(L.latLng(DEFAULT_LAT, DEFAULT_LON));
 
 document.getElementById('radius').addEventListener('input', updateCircle);
 
