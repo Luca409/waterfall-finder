@@ -35,7 +35,7 @@ limiter = Limiter(
 MAX_CONCURRENT_JOBS_PER_IP = 1
 DEFAULT_LAT = 42.42457
 DEFAULT_LON = -74.40353
-DEFAULT_RADIUS_KM = 30
+DEFAULT_RADIUS_KM = 15
 
 
 @app.errorhandler(429)
@@ -577,7 +577,7 @@ HTML = """<!DOCTYPE html>
   <span class="hint">Click map to set center</span>
   <span id="coords-display">No center set</span>
   <label>Radius (km)
-    <input type="number" id="radius" value="30" min="1" max="100" step="1"/>
+    <input type="number" id="radius" value="15" min="1" max="100" step="1"/>
   </label>
   <button id="search-btn" onclick="doSearch()">Search</button>
   <span id="status"></span>
@@ -594,7 +594,7 @@ HTML = """<!DOCTYPE html>
 <script>
 const DEFAULT_LAT = 42.42457;
 const DEFAULT_LON = -74.40353;
-const DEFAULT_RADIUS_KM = 30;
+const DEFAULT_RADIUS_KM = 15;
 
 const map = L.map('map').setView([DEFAULT_LAT, DEFAULT_LON], 11);
 
