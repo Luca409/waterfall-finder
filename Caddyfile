@@ -1,0 +1,3 @@
+waterfall-finder.net, www.waterfall-finder.net {
+	reverse_proxy waterfall-finder:8080
+}
