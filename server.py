@@ -3,7 +3,8 @@
 Waterfall Finder Web Server
 """
 
-import os, json, math, time, hashlib, tempfile, urllib.request, urllib.parse, urllib.error, ssl, sys, queue, threading
+import os, json, math, time, hashlib, tempfile, urllib.request, urllib.parse, urllib.error, ssl, sys, threading, secrets
+from pathlib import Path
 import numpy as np
 import rasterio
 from rasterio.merge import merge as rio_merge
@@ -15,6 +16,9 @@ from flask import Flask, request, jsonify, Response, stream_with_context
 
 app = Flask(__name__)
 os.makedirs("data/cache", exist_ok=True)
+JOBS_DIR = Path("data/cache/jobs")
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+_jobs_lock = threading.Lock()
 os.environ["GDAL_HTTP_UNSAFESSL"] = "YES"
 
 # macOS ships without root certs for Python; bypass verification for USGS/Census APIs
@@ -344,6 +348,80 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
 
 
 # ---------------------------------------------------------------------------
+# Background search jobs (file-backed so multiple gunicorn workers can share state)
+# ---------------------------------------------------------------------------
+
+def _job_path(job_id):
+    return JOBS_DIR / f"{job_id}.json"
+
+
+def create_job(lat, lon, radius_km):
+    job_id = secrets.token_hex(8)
+    job = {
+        "id": job_id,
+        "status": "pending",
+        "pct": 0,
+        "label": "Queued…",
+        "lat": lat,
+        "lon": lon,
+        "radius_km": radius_km,
+        "result": None,
+        "error": None,
+    }
+    with _jobs_lock:
+        _job_path(job_id).write_text(json.dumps(job))
+    return job_id
+
+
+def get_job(job_id):
+    path = _job_path(job_id)
+    if not path.exists():
+        return None
+    with _jobs_lock:
+        return json.loads(path.read_text())
+
+
+def update_job(job_id, **fields):
+    with _jobs_lock:
+        job = json.loads(_job_path(job_id).read_text())
+        job.update(fields)
+        _job_path(job_id).write_text(json.dumps(job))
+
+
+def _run_job(job_id, lat, lon, radius_km):
+    try:
+        update_job(job_id, status="running", pct=2, label="Starting search…")
+
+        def on_progress(pct, label):
+            update_job(job_id, pct=pct, label=label)
+
+        result = run_analysis(lat, lon, radius_km, on_progress=on_progress)
+        update_job(job_id, status="done", pct=100, label="Done", result=result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        update_job(job_id, status="error", error=str(e))
+
+
+def start_job(job_id, lat, lon, radius_km):
+    threading.Thread(target=_run_job, args=(job_id, lat, lon, radius_km), daemon=True).start()
+
+
+def wait_for_job(job_id, timeout=120):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = get_job(job_id)
+        if not job:
+            return None
+        if job["status"] == "done":
+            return job
+        if job["status"] == "error":
+            return job
+        time.sleep(0.2)
+    return get_job(job_id)
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -506,11 +584,19 @@ async function doSearch() {
   resultsLayer.clearLayers();
 
   try {
-    const res = await fetch('/search', {
+    const startRes = await fetch('/search', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ lat: centerLatLon.lat, lon: centerLatLon.lng, radius_km: radius }),
     });
+    if (!startRes.ok) {
+      const err = await startRes.json().catch(() => ({ error: startRes.statusText }));
+      throw new Error(err.error || 'Search failed');
+    }
+    const { job_id } = await startRes.json();
+    if (!job_id) throw new Error('No job id returned');
+
+    const res = await fetch(`/search/${job_id}/events`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
       throw new Error(err.error || 'Search failed');
@@ -598,46 +684,64 @@ def _sse(event, data):
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _parse_search_params(data):
+    lat = float(data["lat"])
+    lon = float(data["lon"])
+    radius_km = float(data["radius_km"])
+    if radius_km > 150:
+        raise ValueError("Radius too large (max 150 km)")
+    return lat, lon, radius_km
+
+
 @app.route("/search", methods=["POST"])
 def search():
     data = request.get_json()
     try:
-        lat = float(data["lat"])
-        lon = float(data["lon"])
-        radius_km = float(data["radius_km"])
-        if radius_km > 150:
-            return jsonify({"error": "Radius too large (max 150 km)"}), 400
+        lat, lon, radius_km = _parse_search_params(data)
     except (TypeError, ValueError, KeyError) as e:
         return jsonify({"error": str(e)}), 400
 
-    if request.headers.get("Accept") != "text/event-stream":
-        try:
-            return jsonify(run_analysis(lat, lon, radius_km))
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            return jsonify({"error": str(e)}), 500
+    job_id = create_job(lat, lon, radius_km)
+    start_job(job_id, lat, lon, radius_km)
 
-    q = queue.Queue()
+    if request.headers.get("Accept") == "application/json" and request.args.get("wait") == "1":
+        job = wait_for_job(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job["status"] == "error":
+            return jsonify({"error": job["error"]}), 500
+        if job["status"] != "done":
+            return jsonify({"error": "Search timed out"}), 504
+        return jsonify(job["result"])
 
-    def on_progress(pct, label):
-        q.put(("progress", {"pct": pct, "label": label}))
+    return jsonify({"job_id": job_id}), 202
 
-    def work():
-        try:
-            q.put(("result", run_analysis(lat, lon, radius_km, on_progress=on_progress)))
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            q.put(("error", {"message": str(e)}))
 
-    threading.Thread(target=work, daemon=True).start()
+@app.route("/search/<job_id>/events")
+def search_events(job_id):
+    if not get_job(job_id):
+        return jsonify({"error": "Job not found"}), 404
 
     @stream_with_context
     def generate():
+        last_pct = -1
+        last_label = ""
         while True:
-            kind, payload = q.get()
-            yield _sse(kind, payload)
-            if kind in ("result", "error"):
+            job = get_job(job_id)
+            if not job:
+                yield _sse("error", {"message": "Job not found"})
                 break
+            if job["pct"] != last_pct or job["label"] != last_label:
+                last_pct = job["pct"]
+                last_label = job["label"]
+                yield _sse("progress", {"pct": job["pct"], "label": job["label"]})
+            if job["status"] == "done":
+                yield _sse("result", job["result"])
+                break
+            if job["status"] == "error":
+                yield _sse("error", {"message": job["error"]})
+                break
+            time.sleep(0.3)
 
     return Response(generate(), mimetype="text/event-stream")
 

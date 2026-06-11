@@ -19,5 +19,5 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8080
 
-# One worker: each search loads a full DEM into memory.
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--timeout", "120", "--access-logfile", "-", "server:app"]
+# Two workers serve pages while searches run in background threads.
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "120", "--access-logfile", "-", "server:app"]

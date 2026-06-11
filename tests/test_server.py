@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 from unittest.mock import patch
 
 import pytest
@@ -7,9 +8,12 @@ import pytest
 from server import (
     _sse,
     app,
+    create_job,
     dem_tile_urls,
+    get_job,
     radius_bbox,
     run_analysis,
+    start_job,
     utm_crs,
 )
 
@@ -71,8 +75,17 @@ class TestRoutes:
         res = client.post("/search", json={"lat": "not-a-number"})
         assert res.status_code == 400
 
+    def test_search_returns_job_id(self, client):
+        with patch("server.start_job"):
+            res = client.post(
+                "/search",
+                json={"lat": 42.7, "lon": -74.4, "radius_km": 15},
+            )
+        assert res.status_code == 202
+        assert "job_id" in res.get_json()
+
     @patch("server.run_analysis")
-    def test_search_returns_geojson(self, mock_run, client):
+    def test_search_wait_returns_geojson(self, mock_run, client):
         mock_run.return_value = {
             "type": "FeatureCollection",
             "features": [
@@ -89,14 +102,16 @@ class TestRoutes:
             ],
         }
         res = client.post(
-            "/search",
+            "/search?wait=1",
+            headers={"Accept": "application/json"},
             json={"lat": 42.7, "lon": -74.4, "radius_km": 15},
         )
         assert res.status_code == 200
         data = res.get_json()
         assert data["type"] == "FeatureCollection"
         assert len(data["features"]) == 1
-        mock_run.assert_called_once_with(42.7, -74.4, 15)
+        mock_run.assert_called_once()
+        assert mock_run.call_args[0][:3] == (42.7, -74.4, 15)
 
     @patch("server.run_analysis")
     def test_search_streams_progress_events(self, mock_run, client):
@@ -108,16 +123,24 @@ class TestRoutes:
 
         mock_run.side_effect = fake_analysis
 
-        res = client.post(
+        start = client.post(
             "/search",
-            headers={"Accept": "text/event-stream"},
             json={"lat": 42.7, "lon": -74.4, "radius_km": 15},
         )
+        assert start.status_code == 202
+        job_id = start.get_json()["job_id"]
+
+        res = client.get(f"/search/{job_id}/events")
         assert res.status_code == 200
         body = res.data.decode()
         assert "event: progress" in body
         assert "event: result" in body
-        assert "Fetching stream network" in body
+        assert '"pct":' in body
+
+    @patch("server.run_analysis")
+    def test_search_events_404_for_unknown_job(self, mock_run, client):
+        res = client.get("/search/doesnotexist/events")
+        assert res.status_code == 404
 
 
 class TestRunAnalysis:
@@ -154,6 +177,25 @@ class TestRunAnalysis:
 
         assert result == cached
         assert progress == [(100, "Using cached results")]
+
+
+class TestJobs:
+    @patch("server.run_analysis")
+    def test_job_runs_in_background(self, mock_run, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data" / "cache" / "jobs").mkdir(parents=True)
+        mock_run.return_value = {"type": "FeatureCollection", "features": []}
+
+        job_id = create_job(42.7, -74.4, 15)
+        start_job(job_id, 42.7, -74.4, 15)
+
+        for _ in range(50):
+            job = get_job(job_id)
+            if job["status"] == "done":
+                break
+            time.sleep(0.05)
+        assert job["status"] == "done"
+        assert job["result"]["type"] == "FeatureCollection"
 
 
 class TestSse:
