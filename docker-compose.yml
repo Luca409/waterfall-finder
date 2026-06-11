@@ -1,0 +1,11 @@
+services:
+  waterfall-finder:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - waterfall-cache:/app/data/cache
+    restart: unless-stopped
+
+volumes:
+  waterfall-cache:

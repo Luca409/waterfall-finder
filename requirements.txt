@@ -1,0 +1,6 @@
+rasterio
+shapely
+pyproj
+numpy
+flask
+gunicorn
