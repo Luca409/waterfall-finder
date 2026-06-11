@@ -32,7 +32,10 @@ limiter = Limiter(
     default_limits=["120 per minute"],
     storage_uri="memory://",
 )
-MAX_CONCURRENT_JOBS_PER_IP = 2
+MAX_CONCURRENT_JOBS_PER_IP = 1
+DEFAULT_LAT = 42.42457
+DEFAULT_LON = -74.40353
+DEFAULT_RADIUS_KM = 30
 
 
 @app.errorhandler(429)
@@ -323,6 +326,8 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
             })
 
     print(f"  {len(hits)} raw hits")
+    src_dem.close()
+    del dem_data, src_dem, flowlines_fc
     report(92, "Clustering waterfall candidates…")
 
     # Cluster within 120m
@@ -361,7 +366,6 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
             "_p": p,
         })
 
-    src_dem.close()
     print(f"  {len(sites)} waterfall candidates")
     report(98, f"Found {len(sites)} candidates")
 
@@ -657,18 +661,19 @@ function hideProgress() {
   bar.style.width = '0%';
 }
 
-function parseSseChunk(chunk) {
-  const events = [];
-  for (const block of chunk.split('\\n\\n')) {
-    if (!block.trim()) continue;
-    let event = 'message', data = '';
-    for (const line of block.split('\\n')) {
-      if (line.startsWith('event: ')) event = line.slice(7);
-      else if (line.startsWith('data: ')) data = line.slice(6);
+async function pollJob(job_id) {
+  for (;;) {
+    const res = await fetch(`/search/${job_id}/status`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || 'Search failed');
     }
-    if (data) events.push({ event, data: JSON.parse(data) });
+    const job = await res.json();
+    setProgress(job.pct, job.label);
+    if (job.status === 'done') return job.result;
+    if (job.status === 'error') throw new Error(job.error || 'Search failed');
+    await new Promise(r => setTimeout(r, 500));
   }
-  return events;
 }
 
 function renderResults(fc, opts = {}) {
@@ -743,44 +748,7 @@ async function doSearch() {
     const { job_id } = await startRes.json();
     if (!job_id) throw new Error('No job id returned');
 
-    const res = await fetch(`/search/${job_id}/events`);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error(err.error || 'Search failed');
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let fc = null;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split('\\n\\n');
-      buffer = parts.pop() || '';
-      for (const part of parts) {
-        for (const evt of parseSseChunk(part + '\\n\\n')) {
-          if (evt.event === 'progress') {
-            setProgress(evt.data.pct, evt.data.label);
-          } else if (evt.event === 'error') {
-            throw new Error(evt.data.message);
-          } else if (evt.event === 'result') {
-            fc = evt.data;
-          }
-        }
-      }
-    }
-    if (buffer.trim()) {
-      for (const evt of parseSseChunk(buffer)) {
-        if (evt.event === 'progress') setProgress(evt.data.pct, evt.data.label);
-        else if (evt.event === 'error') throw new Error(evt.data.message);
-        else if (evt.event === 'result') fc = evt.data;
-      }
-    }
-    if (!fc) throw new Error('No results returned');
-
+    const fc = await pollJob(job_id);
     renderResults(fc, { fitBounds: true, updateStatus: true });
   } catch(e) {
     status.textContent = 'Request failed: ' + e.message;
@@ -859,6 +827,24 @@ def search():
         return jsonify(job["result"])
 
     return jsonify({"job_id": job_id}), 202
+
+
+@app.route("/search/<job_id>/status")
+@limiter.limit("120 per minute")
+def search_status(job_id):
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    payload = {
+        "status": job["status"],
+        "pct": job["pct"],
+        "label": job["label"],
+    }
+    if job["status"] == "done":
+        payload["result"] = job["result"]
+    elif job["status"] == "error":
+        payload["error"] = job["error"]
+    return jsonify(payload)
 
 
 @app.route("/search/<job_id>/events")

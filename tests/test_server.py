@@ -125,7 +125,7 @@ class TestRoutes:
         assert mock_run.call_args[0][:3] == (42.7, -74.4, 15)
 
     @patch("server.run_analysis")
-    def test_search_streams_progress_events(self, mock_run, client):
+    def test_search_polls_job_status(self, mock_run, client):
         def fake_analysis(lat, lon, radius_km, on_progress=None):
             if on_progress:
                 on_progress(10, "Fetching stream network…")
@@ -141,12 +141,15 @@ class TestRoutes:
         assert start.status_code == 202
         job_id = start.get_json()["job_id"]
 
-        res = client.get(f"/search/{job_id}/events")
-        assert res.status_code == 200
-        body = res.data.decode()
-        assert "event: progress" in body
-        assert "event: result" in body
-        assert '"pct":' in body
+        for _ in range(50):
+            res = client.get(f"/search/{job_id}/status")
+            assert res.status_code == 200
+            job = res.get_json()
+            if job["status"] == "done":
+                assert job["result"]["type"] == "FeatureCollection"
+                return
+            time.sleep(0.05)
+        raise AssertionError("job did not complete")
 
     @patch("server.run_analysis")
     def test_search_events_404_for_unknown_job(self, mock_run, client):
@@ -244,7 +247,7 @@ class TestRateLimit:
         app.config["RATELIMIT_ENABLED"] = False
 
     def test_concurrent_jobs_limited(self, client, isolated_jobs):
-        for i in range(2):
+        for i in range(1):
             job = {
                 "id": f"job{i}",
                 "status": "running",

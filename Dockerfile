@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py .
+COPY server.py scripts/warm-cache.py ./
 
 RUN mkdir -p data/cache
 
@@ -19,5 +19,5 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8080
 
-# Two workers serve pages while searches run in background threads.
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "120", "--access-logfile", "-", "server:app"]
+# One worker on 2 GB RAM; searches run in background threads.
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--timeout", "300", "--access-logfile", "-", "server:app"]
