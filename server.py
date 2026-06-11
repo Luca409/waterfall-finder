@@ -189,6 +189,22 @@ def results_cache_key(lat, lon, radius_km):
     return hashlib.md5(bbox_sig.encode()).hexdigest()[:10]
 
 
+def _grid_has_neighbor(grid, p, cell_size, merge_dist, items):
+    gx, gy = int(p[0] / cell_size), int(p[1] / cell_size)
+    span = int(math.ceil(merge_dist / cell_size)) + 1
+    for dx in range(-span, span + 1):
+        for dy in range(-span, span + 1):
+            for idx in grid.get((gx + dx, gy + dy), []):
+                if np.hypot(*(p - items[idx]["_p"])) < merge_dist:
+                    return True
+    return False
+
+
+def _grid_add(grid, p, cell_size, items):
+    gx, gy = int(p[0] / cell_size), int(p[1] / cell_size)
+    grid.setdefault((gx, gy), []).append(len(items) - 1)
+
+
 def get_cached_results(lat, lon, radius_km):
     cache_key = results_cache_key(lat, lon, radius_km)
     results_path = f"data/cache/results_{cache_key}.json"
@@ -330,23 +346,27 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
     del dem_data, src_dem, flowlines_fc
     report(92, "Clustering waterfall candidates…")
 
-    # Cluster within 120m
+    # Cluster within 120m (grid index avoids O(n^2) over large hit sets)
     hits.sort(key=lambda h: -h["drop50"])
     clusters = []
+    cluster_grid = {}
     for h in hits:
         p = np.array(to_utm(h["lon"], h["lat"]))
-        if not any(np.hypot(*(p - c["_p"])) < 120 for c in clusters):
-            s = segs[h["si"]]
-            clusters.append({**h, "_p": p, "stream": s["name"],
-                             "uplen_km": memo[h["si"]] / 1000.0})
+        if _grid_has_neighbor(cluster_grid, p, 120, 120, clusters):
+            continue
+        s = segs[h["si"]]
+        clusters.append({**h, "_p": p, "stream": s["name"],
+                         "uplen_km": memo[h["si"]] / 1000.0})
+        _grid_add(cluster_grid, p, 120, clusters)
 
     # Merge gorge clusters within 400m, apply min thresholds
     sites = []
+    site_grid = {}
     for c in sorted(clusters, key=lambda x: -x["drop50"]):
         if c["drop50"] < 6:
             continue
-        p = np.array(to_utm(c["lon"], c["lat"]))
-        if any(np.hypot(*(p - s["_p"])) < 400 for s in sites):
+        p = c["_p"]
+        if _grid_has_neighbor(site_grid, p, 400, 400, sites):
             continue
         if not c["stream"]:
             continue
@@ -365,6 +385,7 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
             "size": size,
             "_p": p,
         })
+        _grid_add(site_grid, p, 400, sites)
 
     print(f"  {len(sites)} waterfall candidates")
     report(98, f"Found {len(sites)} candidates")

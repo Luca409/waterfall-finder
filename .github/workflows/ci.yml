@@ -44,4 +44,5 @@ jobs:
             git pull --ff-only origin main
             docker compose up -d --build
             docker image prune -f
-            docker compose exec -T waterfall-finder python warm-cache.py || true
+            nohup docker compose exec -T waterfall-finder python warm-cache.py \
+              >> /var/log/waterfall-finder-warm-cache.log 2>&1 &
