@@ -18,9 +18,18 @@ from server import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_jobs(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "data" / "cache" / "jobs"
+    jobs_dir.mkdir(parents=True)
+    monkeypatch.setattr("server.JOBS_DIR", jobs_dir)
+    return jobs_dir
+
+
 @pytest.fixture
 def client():
     app.config["TESTING"] = True
+    app.config["RATELIMIT_ENABLED"] = False
     with app.test_client() as c:
         yield c
 
@@ -144,9 +153,8 @@ class TestRoutes:
 
 
 class TestRunAnalysis:
-    def test_cached_results_skip_fetch(self, tmp_path, monkeypatch):
-        cache_dir = tmp_path / "data" / "cache"
-        cache_dir.mkdir(parents=True)
+    def test_cached_results_skip_fetch(self, tmp_path, monkeypatch, isolated_jobs):
+        cache_dir = isolated_jobs.parent
 
         lat, lon, radius = 42.7, -74.4, 15
         W, S, E, N = radius_bbox(lat, lon, radius)
@@ -179,11 +187,53 @@ class TestRunAnalysis:
         assert progress == [(100, "Using cached results")]
 
 
+class TestRateLimit:
+    def test_search_rate_limited(self, client):
+        from server import limiter
+
+        app.config["RATELIMIT_ENABLED"] = True
+        limiter.storage.storage.clear()
+        headers = {"X-Forwarded-For": "10.0.0.1"}
+        with patch("server.start_job"), patch("server.active_jobs_for_ip", return_value=0):
+            for _ in range(5):
+                res = client.post(
+                    "/search",
+                    json={"lat": 42.7, "lon": -74.4, "radius_km": 15},
+                    headers=headers,
+                )
+                assert res.status_code == 202
+            res = client.post(
+                "/search",
+                json={"lat": 42.7, "lon": -74.4, "radius_km": 15},
+                headers=headers,
+            )
+            assert res.status_code == 429
+        app.config["RATELIMIT_ENABLED"] = False
+
+    def test_concurrent_jobs_limited(self, client, isolated_jobs):
+        for i in range(2):
+            job = {
+                "id": f"job{i}",
+                "status": "running",
+                "client_ip": "10.0.0.2",
+                "pct": 50,
+                "label": "Working",
+            }
+            (isolated_jobs / f"job{i}.json").write_text(json.dumps(job))
+
+        with patch("server.start_job"):
+            res = client.post(
+                "/search",
+                json={"lat": 42.7, "lon": -74.4, "radius_km": 15},
+                headers={"X-Forwarded-For": "10.0.0.2"},
+            )
+        assert res.status_code == 429
+        assert "in progress" in res.get_json()["error"].lower()
+
+
 class TestJobs:
     @patch("server.run_analysis")
-    def test_job_runs_in_background(self, mock_run, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / "data" / "cache" / "jobs").mkdir(parents=True)
+    def test_job_runs_in_background(self, mock_run):
         mock_run.return_value = {"type": "FeatureCollection", "features": []}
 
         job_id = create_job(42.7, -74.4, 15)

@@ -13,8 +13,31 @@ from shapely.geometry import shape, Point, MultiLineString, mapping
 from shapely.ops import transform as shp_transform
 from pyproj import Transformer
 from flask import Flask, request, jsonify, Response, stream_with_context
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 app = Flask(__name__)
+
+
+def client_ip():
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return get_remote_address()
+
+
+limiter = Limiter(
+    app=app,
+    key_func=client_ip,
+    default_limits=["120 per minute"],
+    storage_uri="memory://",
+)
+MAX_CONCURRENT_JOBS_PER_IP = 2
+
+
+@app.errorhandler(429)
+def rate_limit_exceeded(e):
+    return jsonify({"error": "Too many requests. Please slow down and try again."}), 429
 os.makedirs("data/cache", exist_ok=True)
 JOBS_DIR = Path("data/cache/jobs")
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
@@ -355,7 +378,19 @@ def _job_path(job_id):
     return JOBS_DIR / f"{job_id}.json"
 
 
-def create_job(lat, lon, radius_km):
+def active_jobs_for_ip(ip):
+    count = 0
+    for path in JOBS_DIR.glob("*.json"):
+        try:
+            job = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if job.get("client_ip") == ip and job.get("status") in ("pending", "running"):
+            count += 1
+    return count
+
+
+def create_job(lat, lon, radius_km, client_ip=None):
     job_id = secrets.token_hex(8)
     job = {
         "id": job_id,
@@ -365,6 +400,7 @@ def create_job(lat, lon, radius_km):
         "lat": lat,
         "lon": lon,
         "radius_km": radius_km,
+        "client_ip": client_ip,
         "result": None,
         "error": None,
     }
@@ -694,6 +730,7 @@ def _parse_search_params(data):
 
 
 @app.route("/search", methods=["POST"])
+@limiter.limit("5 per minute; 20 per hour")
 def search():
     data = request.get_json()
     try:
@@ -701,7 +738,11 @@ def search():
     except (TypeError, ValueError, KeyError) as e:
         return jsonify({"error": str(e)}), 400
 
-    job_id = create_job(lat, lon, radius_km)
+    ip = client_ip()
+    if active_jobs_for_ip(ip) >= MAX_CONCURRENT_JOBS_PER_IP:
+        return jsonify({"error": "Too many searches in progress. Please wait."}), 429
+
+    job_id = create_job(lat, lon, radius_km, client_ip=ip)
     start_job(job_id, lat, lon, radius_km)
 
     if request.headers.get("Accept") == "application/json" and request.args.get("wait") == "1":
@@ -718,6 +759,7 @@ def search():
 
 
 @app.route("/search/<job_id>/events")
+@limiter.limit("30 per minute")
 def search_events(job_id):
     if not get_job(job_id):
         return jsonify({"error": "Job not found"}), 404
