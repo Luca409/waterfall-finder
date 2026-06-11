@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py scripts/warm-cache.py ./
+COPY server.py analytics.py scripts/warm-cache.py ./
 
 RUN mkdir -p data/cache
 

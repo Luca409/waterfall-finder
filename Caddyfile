@@ -1,3 +1,10 @@
 waterfall-finder.net, www.waterfall-finder.net {
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+		format json
+	}
 	reverse_proxy waterfall-finder:8080
 }

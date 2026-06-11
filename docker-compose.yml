@@ -3,6 +3,8 @@ services:
     build: .
     expose:
       - "8080"
+    environment:
+      - STATS_SECRET=${STATS_SECRET:-}
     volumes:
       - waterfall-cache:/app/data/cache
     restart: unless-stopped
@@ -16,6 +18,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
       - caddy_config:/config
+      - caddy_logs:/var/log/caddy
     restart: unless-stopped
     depends_on:
       - waterfall-finder
@@ -24,3 +27,4 @@ volumes:
   waterfall-cache:
   caddy_data:
   caddy_config:
+  caddy_logs:

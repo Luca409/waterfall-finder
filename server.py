@@ -16,6 +16,8 @@ from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
+from analytics import record as record_event, summary as analytics_summary
+
 app = Flask(__name__)
 
 
@@ -473,10 +475,12 @@ def _run_job(job_id, lat, lon, radius_km):
 
         result = run_analysis(lat, lon, radius_km, on_progress=on_progress)
         update_job(job_id, status="done", pct=100, label="Done", result=result)
+        record_event("search_done", path=f"/search/{job_id}")
     except Exception as e:
         import traceback
         traceback.print_exc()
         update_job(job_id, status="error", error=str(e))
+        record_event("search_error", path=f"/search/{job_id}")
 
 
 def start_job(job_id, lat, lon, radius_km):
@@ -541,6 +545,21 @@ HTML = """<!DOCTYPE html>
       transition: width 0.35s ease;
     }
     #map { flex: 1; }
+    .wf-marker { background: transparent; border: none; }
+    .wf-hit {
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+    }
+    .wf-dot {
+      border-radius: 50%; border: 2px solid #fff;
+      box-shadow: 0 1px 3px rgba(0,0,0,.5);
+      pointer-events: none;
+    }
+    .wf-center-dot {
+      border-radius: 50%; background: #fff; border: 3px solid #333;
+      box-shadow: 0 1px 4px rgba(0,0,0,.6);
+      pointer-events: none;
+    }
     .wf-popup { min-width: 180px; }
     .wf-popup b { font-size: 1rem; }
     .wf-popup .stat { color: #555; font-size: 0.85rem; margin-top: 2px; }
@@ -596,7 +615,18 @@ const DEFAULT_LAT = 42.42457;
 const DEFAULT_LON = -74.40353;
 const DEFAULT_RADIUS_KM = 15;
 
-const map = L.map('map').setView([DEFAULT_LAT, DEFAULT_LON], 11);
+function isCoarsePointer() {
+  return window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 768;
+}
+
+function markerSizes() {
+  if (isCoarsePointer()) return { hit: 44, dot: 26, center: 30 };
+  return { hit: 22, dot: 14, center: 18 };
+}
+
+const map = L.map('map', {
+  tapTolerance: isCoarsePointer() ? 25 : 15,
+}).setView([DEFAULT_LAT, DEFAULT_LON], 11);
 
 L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenTopoMap contributors',
@@ -608,13 +638,17 @@ let radiusCircle = null;
 let resultsLayer = L.featureGroup().addTo(map);
 let centerLatLon = null;
 let userHasSetCenter = false;
+let lastResults = null;
 
 function dotIcon(color) {
+  const { hit, dot } = markerSizes();
+  const anchor = hit / 2;
   return L.divIcon({
-    className: '',
-    html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.5)"></div>`,
-    iconSize: [14, 14],
-    iconAnchor: [7, 7],
+    className: 'wf-marker',
+    html: `<div class="wf-hit" style="width:${hit}px;height:${hit}px">`
+      + `<div class="wf-dot" style="width:${dot}px;height:${dot}px;background:${color}"></div></div>`,
+    iconSize: [hit, hit],
+    iconAnchor: [anchor, anchor],
   });
 }
 
@@ -635,11 +669,14 @@ function setSearchCenter(latlng) {
     `${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}`;
 
   if (centerMarker) map.removeLayer(centerMarker);
+  const { hit, center } = markerSizes();
+  const anchor = hit / 2;
   centerMarker = L.marker(latlng, {
     icon: L.divIcon({
-      className: '',
-      html: '<div style="width:18px;height:18px;border-radius:50%;background:#fff;border:3px solid #333;box-shadow:0 1px 4px rgba(0,0,0,.6)"></div>',
-      iconSize: [18, 18], iconAnchor: [9, 9],
+      className: 'wf-marker',
+      html: `<div class="wf-hit" style="width:${hit}px;height:${hit}px">`
+        + `<div class="wf-center-dot" style="width:${center}px;height:${center}px"></div></div>`,
+      iconSize: [hit, hit], iconAnchor: [anchor, anchor],
     })
   }).addTo(map).bindPopup('Search center');
 
@@ -698,6 +735,7 @@ async function pollJob(job_id) {
 }
 
 function renderResults(fc, opts = {}) {
+  lastResults = fc;
   resultsLayer.clearLayers();
   fc.features.forEach(f => {
     const p = f.properties;
@@ -745,6 +783,12 @@ async function loadDefaultResults() {
   } catch (e) {}
 }
 
+window.addEventListener('resize', () => {
+  map.options.tapTolerance = isCoarsePointer() ? 25 : 15;
+  if (lastResults) renderResults(lastResults);
+  if (userHasSetCenter && centerLatLon) setSearchCenter(centerLatLon);
+});
+
 loadDefaultResults();
 
 async function doSearch() {
@@ -785,9 +829,67 @@ async function doSearch() {
 """
 
 
+def _stats_page(data):
+    rows = "".join(
+        f"<tr><td>{r['date']}</td><td>{r['unique_visitors']}</td>"
+        f"<td>{r['page_views']}</td><td>{r['preloads']}</td>"
+        f"<td>{r['searches']}</td><td>{r['searches_done']}</td></tr>"
+        for r in data["daily"]
+    ) or "<tr><td colspan='6'>No traffic yet</td></tr>"
+    recent = "".join(
+        f"<li><code>{e['ts']}</code> {e['event']} <span>{e['path']}</span></li>"
+        for e in data["recent"]
+    ) or "<li>No recent activity</li>"
+    t = data["totals"]
+    return f"""<!DOCTYPE html>
+<html><head>
+  <meta charset="utf-8"/>
+  <title>Waterfall Finder — Traffic</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #222; }}
+    h1 {{ font-size: 1.4rem; }}
+    table {{ border-collapse: collapse; margin: 16px 0 24px; }}
+    th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
+    th {{ background: #f5f5f5; }}
+    .cards {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }}
+    .card {{ background: #f8f9fb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 16px; min-width: 120px; }}
+    .card strong {{ display: block; font-size: 1.5rem; }}
+    li {{ margin: 4px 0; }}
+    li span {{ color: #666; }}
+    .meta {{ color: #666; font-size: 0.9rem; }}
+  </style>
+</head><body>
+  <h1>Waterfall Finder traffic</h1>
+  <p class="meta">Updated {data['updated_at']} UTC</p>
+  <div class="cards">
+    <div class="card"><strong>{t['page_views']}</strong> page views</div>
+    <div class="card"><strong>{t['preloads']}</strong> map preloads</div>
+    <div class="card"><strong>{t['searches']}</strong> searches started</div>
+    <div class="card"><strong>{t['searches_done']}</strong> searches finished</div>
+    <div class="card"><strong>{t['search_errors']}</strong> search errors</div>
+  </div>
+  <h2>Last 14 days</h2>
+  <table>
+    <tr><th>Date</th><th>Unique visitors</th><th>Page views</th><th>Preloads</th><th>Searches</th><th>Finished</th></tr>
+    {rows}
+  </table>
+  <h2>Recent activity</h2>
+  <ul>{recent}</ul>
+</body></html>"""
+
+
 @app.route("/")
 def index():
+    record_event("page_view", path="/", ip=client_ip())
     return HTML
+
+
+@app.route("/stats")
+def stats():
+    secret = os.environ.get("STATS_SECRET", "")
+    if not secret or request.args.get("key") != secret:
+        return "Not found", 404
+    return _stats_page(analytics_summary())
 
 
 def _sse(event, data):
@@ -818,6 +920,7 @@ def cached():
     result = get_cached_results(lat, lon, radius_km)
     if result is None:
         return jsonify({"error": "No cached results"}), 404
+    record_event("preload", path="/cached", ip=client_ip())
     return jsonify(result)
 
 
@@ -835,6 +938,7 @@ def search():
         return jsonify({"error": "Too many searches in progress. Please wait."}), 429
 
     job_id = create_job(lat, lon, radius_km, client_ip=ip)
+    record_event("search", path="/search", ip=ip)
     start_job(job_id, lat, lon, radius_km)
 
     if request.headers.get("Accept") == "application/json" and request.args.get("wait") == "1":

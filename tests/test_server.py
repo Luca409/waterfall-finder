@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+import analytics
 from server import (
     _sse,
     app,
@@ -25,6 +26,7 @@ def isolated_jobs(tmp_path, monkeypatch):
     jobs_dir = tmp_path / "data" / "cache" / "jobs"
     jobs_dir.mkdir(parents=True)
     monkeypatch.setattr("server.JOBS_DIR", jobs_dir)
+    monkeypatch.setattr(analytics, "ANALYTICS_PATH", tmp_path / "analytics.json")
     return jobs_dir
 
 
@@ -186,6 +188,15 @@ class TestRoutes:
     def test_cached_404_when_missing(self, client):
         res = client.get("/cached?lat=1&lon=2&radius_km=30")
         assert res.status_code == 404
+
+    def test_stats_requires_secret(self, client, monkeypatch):
+        monkeypatch.delenv("STATS_SECRET", raising=False)
+        assert client.get("/stats?key=wrong").status_code == 404
+
+        monkeypatch.setenv("STATS_SECRET", "s3cret")
+        res = client.get("/stats?key=s3cret")
+        assert res.status_code == 200
+        assert "Waterfall Finder traffic" in res.get_data(as_text=True)
 
 
 class TestRunAnalysis:
