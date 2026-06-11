@@ -189,12 +189,8 @@ class TestRoutes:
         res = client.get("/cached?lat=1&lon=2&radius_km=30")
         assert res.status_code == 404
 
-    def test_stats_requires_secret(self, client, monkeypatch):
-        monkeypatch.delenv("STATS_SECRET", raising=False)
-        assert client.get("/stats?key=wrong").status_code == 404
-
-        monkeypatch.setenv("STATS_SECRET", "s3cret")
-        res = client.get("/stats?key=s3cret")
+    def test_stats_is_public(self, client):
+        res = client.get("/stats")
         assert res.status_code == 200
         assert "Waterfall Finder traffic" in res.get_data(as_text=True)
 

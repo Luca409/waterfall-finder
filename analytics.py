@@ -13,7 +13,7 @@ _DAILY_RETENTION_DAYS = 90
 
 
 def _empty():
-    return {"totals": {}, "daily": {}, "recent": []}
+    return {"totals": {}, "daily": {}, "all_time_visitors": {}, "recent": []}
 
 
 def _load():
@@ -52,9 +52,12 @@ def record(event, path="", ip=""):
         events = day.setdefault("events", {})
         events[event] = events.get(event, 0) + 1
         if ip:
-            visitors = day.setdefault("visitors", {})
             vh = visitor_hash(ip)
+            visitors = day.setdefault("visitors", {})
             visitors[vh] = visitors.get(vh, 0) + 1
+            if event == "page_view":
+                all_time = data.setdefault("all_time_visitors", {})
+                all_time.setdefault(vh, today)
 
         recent = data.setdefault("recent", [])
         recent.insert(0, {
@@ -87,8 +90,25 @@ def summary():
             "searches_done": events.get("search_done", 0),
         })
 
+    today = date.today().isoformat()
+    week_cutoff = (date.today() - timedelta(days=6)).isoformat()
+    week_visitors = set()
+    for day, entry in daily.items():
+        if day >= week_cutoff:
+            week_visitors.update(entry.get("visitors", {}))
+
+    today_visitors = len(daily.get(today, {}).get("visitors", {}))
+    new_today = sum(
+        1 for first_seen in data.get("all_time_visitors", {}).values()
+        if first_seen == today
+    )
+
     return {
         "totals": {
+            "unique_visitors_all_time": len(data.get("all_time_visitors", {})),
+            "unique_visitors_today": today_visitors,
+            "unique_visitors_7d": len(week_visitors),
+            "new_visitors_today": new_today,
             "page_views": totals.get("page_view", 0),
             "preloads": totals.get("preload", 0),
             "searches": totals.get("search", 0),

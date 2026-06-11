@@ -853,6 +853,7 @@ def _stats_page(data):
     th {{ background: #f5f5f5; }}
     .cards {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }}
     .card {{ background: #f8f9fb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 16px; min-width: 120px; }}
+    .card.users {{ background: #eef4ff; border-color: #c7d9f7; }}
     .card strong {{ display: block; font-size: 1.5rem; }}
     li {{ margin: 4px 0; }}
     li span {{ color: #666; }}
@@ -860,7 +861,15 @@ def _stats_page(data):
   </style>
 </head><body>
   <h1>Waterfall Finder traffic</h1>
-  <p class="meta">Updated {data['updated_at']} UTC</p>
+  <p class="meta">Updated {data['updated_at']} UTC · users counted by hashed IP on homepage visits</p>
+  <h2>Users</h2>
+  <div class="cards">
+    <div class="card users"><strong>{t['unique_visitors_today']}</strong> users today</div>
+    <div class="card users"><strong>{t['new_visitors_today']}</strong> new users today</div>
+    <div class="card users"><strong>{t['unique_visitors_7d']}</strong> users last 7 days</div>
+    <div class="card users"><strong>{t['unique_visitors_all_time']}</strong> users all time</div>
+  </div>
+  <h2>Activity</h2>
   <div class="cards">
     <div class="card"><strong>{t['page_views']}</strong> page views</div>
     <div class="card"><strong>{t['preloads']}</strong> map preloads</div>
@@ -886,9 +895,6 @@ def index():
 
 @app.route("/stats")
 def stats():
-    secret = os.environ.get("STATS_SECRET", "")
-    if not secret or request.args.get("key") != secret:
-        return "Not found", 404
     return _stats_page(analytics_summary())
 
 
