@@ -180,20 +180,34 @@ def fetch_flowlines(W, S, E, N, cache_key, on_progress=None):
 # Core analysis
 # ---------------------------------------------------------------------------
 
+def results_cache_key(lat, lon, radius_km):
+    W, S, E, N = radius_bbox(lat, lon, radius_km)
+    bbox_sig = f"{W:.3f}{S:.3f}{E:.3f}{N:.3f}"
+    return hashlib.md5(bbox_sig.encode()).hexdigest()[:10]
+
+
+def get_cached_results(lat, lon, radius_km):
+    cache_key = results_cache_key(lat, lon, radius_km)
+    results_path = f"data/cache/results_{cache_key}.json"
+    if os.path.exists(results_path):
+        return json.load(open(results_path))
+    return None
+
+
 def run_analysis(lat, lon, radius_km, on_progress=None):
     def report(pct, label):
         if on_progress:
             on_progress(pct, label)
 
     W, S, E, N = radius_bbox(lat, lon, radius_km)
-    bbox_sig = f"{W:.3f}{S:.3f}{E:.3f}{N:.3f}"
-    cache_key = hashlib.md5(bbox_sig.encode()).hexdigest()[:10]
-
+    cache_key = results_cache_key(lat, lon, radius_km)
     results_path = f"data/cache/results_{cache_key}.json"
-    if os.path.exists(results_path):
+
+    cached = get_cached_results(lat, lon, radius_km)
+    if cached is not None:
         print(f"Returning cached results for {cache_key}")
         report(100, "Using cached results")
-        return json.load(open(results_path))
+        return cached
 
     utm_epsg = utm_crs(lat, lon)
     to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{utm_epsg}", always_xy=True).transform
@@ -260,6 +274,7 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
     def upstream_len(si):
         if si in memo:
             return memo[si]
+        memo[si] = 0  # reserve slot to break cycles in the stream graph
         memo[si] = segs[si]["len"] + sum(
             upstream_len(j) for j in into.get(segs[si]["up"], []) if j != si
         )
@@ -604,8 +619,6 @@ map.on('click', function(e) {
   setSearchCenter(e.latlng);
 });
 
-setSearchCenter(L.latLng(DEFAULT_LAT, DEFAULT_LON));
-
 document.getElementById('radius').addEventListener('input', updateCircle);
 
 function updateCircle() {
@@ -647,6 +660,55 @@ function parseSseChunk(chunk) {
   }
   return events;
 }
+
+function renderResults(fc, opts = {}) {
+  resultsLayer.clearLayers();
+  fc.features.forEach(f => {
+    const p = f.properties;
+    const color = sizeColors[p.size] || '#888';
+    const marker = L.marker([f.geometry.coordinates[1], f.geometry.coordinates[0]], {
+      icon: dotIcon(color),
+      zIndexOffset: p.size === 'big' ? 200 : p.size === 'medium' ? 100 : 0,
+    });
+    marker.bindPopup(`
+      <div class="wf-popup">
+        <b>${p.stream}</b>
+        <div class="stat">Drop: <b>${p.drop_m} m</b> over 50 m window</div>
+        <div class="stat">Elevation: ${p.elevation_m} m</div>
+        <div class="stat">Size: likely ${p.size} waterfall</div>
+        <div style="margin-top:6px">
+          <a href="https://www.google.com/maps?q=${f.geometry.coordinates[1]},${f.geometry.coordinates[0]}" target="_blank">Open in Google Maps</a>
+        </div>
+      </div>
+    `);
+    resultsLayer.addLayer(marker);
+  });
+
+  const count = fc.features.length;
+  if (opts.updateStatus) {
+    document.getElementById('status').textContent =
+      `Found ${count} candidate${count !== 1 ? 's' : ''}.`;
+  }
+  if (opts.fitBounds && count > 0) {
+    const latlngs = fc.features.map(f => [f.geometry.coordinates[1], f.geometry.coordinates[0]]);
+    map.fitBounds(L.latLngBounds(latlngs).pad(0.2));
+  }
+}
+
+async function loadDefaultResults() {
+  try {
+    const params = new URLSearchParams({
+      lat: DEFAULT_LAT,
+      lon: DEFAULT_LON,
+      radius_km: DEFAULT_RADIUS_KM,
+    });
+    const res = await fetch(`/cached?${params}`);
+    if (!res.ok) return;
+    renderResults(await res.json(), { fitBounds: true });
+  } catch (e) {}
+}
+
+loadDefaultResults();
 
 async function doSearch() {
   if (!centerLatLon) { alert('Click the map to set a search center first.'); return; }
@@ -708,33 +770,7 @@ async function doSearch() {
     }
     if (!fc) throw new Error('No results returned');
 
-    fc.features.forEach(f => {
-      const p = f.properties;
-      const color = sizeColors[p.size] || '#888';
-      const marker = L.marker([f.geometry.coordinates[1], f.geometry.coordinates[0]], {
-        icon: dotIcon(color),
-        zIndexOffset: p.size === 'big' ? 200 : p.size === 'medium' ? 100 : 0,
-      });
-      marker.bindPopup(`
-        <div class="wf-popup">
-          <b>${p.stream}</b>
-          <div class="stat">Drop: <b>${p.drop_m} m</b> over 50 m window</div>
-          <div class="stat">Elevation: ${p.elevation_m} m</div>
-          <div class="stat">Size: likely ${p.size} waterfall</div>
-          <div style="margin-top:6px">
-            <a href="https://www.google.com/maps?q=${f.geometry.coordinates[1]},${f.geometry.coordinates[0]}" target="_blank">Open in Google Maps</a>
-          </div>
-        </div>
-      `);
-      resultsLayer.addLayer(marker);
-    });
-
-    const count = fc.features.length;
-    status.textContent = `Found ${count} candidate${count !== 1 ? 's' : ''}.`;
-    if (count > 0) {
-      const latlngs = fc.features.map(f => [f.geometry.coordinates[1], f.geometry.coordinates[0]]);
-      map.fitBounds(L.latLngBounds(latlngs).pad(0.2));
-    }
+    renderResults(fc, { fitBounds: true, updateStatus: true });
   } catch(e) {
     status.textContent = 'Request failed: ' + e.message;
     hideProgress();
@@ -765,6 +801,24 @@ def _parse_search_params(data):
     if radius_km > 150:
         raise ValueError("Radius too large (max 150 km)")
     return lat, lon, radius_km
+
+
+@app.route("/cached")
+@limiter.limit("30 per minute")
+def cached():
+    try:
+        lat = float(request.args["lat"])
+        lon = float(request.args["lon"])
+        radius_km = float(request.args["radius_km"])
+        if radius_km > 150:
+            return jsonify({"error": "Radius too large (max 150 km)"}), 400
+    except (TypeError, ValueError, KeyError) as e:
+        return jsonify({"error": str(e)}), 400
+
+    result = get_cached_results(lat, lon, radius_km)
+    if result is None:
+        return jsonify({"error": "No cached results"}), 404
+    return jsonify(result)
 
 
 @app.route("/search", methods=["POST"])

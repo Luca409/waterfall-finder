@@ -10,8 +10,10 @@ from server import (
     app,
     create_job,
     dem_tile_urls,
+    get_cached_results,
     get_job,
     radius_bbox,
+    results_cache_key,
     run_analysis,
     start_job,
     utm_crs,
@@ -149,6 +151,37 @@ class TestRoutes:
     @patch("server.run_analysis")
     def test_search_events_404_for_unknown_job(self, mock_run, client):
         res = client.get("/search/doesnotexist/events")
+        assert res.status_code == 404
+
+    def test_cached_returns_results(self, client, isolated_jobs, monkeypatch):
+        monkeypatch.chdir(isolated_jobs.parent.parent.parent)
+        cache_dir = isolated_jobs.parent
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        lat, lon, radius = 42.42457, -74.40353, 30
+        cache_key = results_cache_key(lat, lon, radius)
+        cached = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [-74.4, 42.4]},
+                    "properties": {
+                        "stream": "Test Creek",
+                        "drop_m": 10.0,
+                        "elevation_m": 300,
+                        "size": "small",
+                    },
+                }
+            ],
+        }
+        (cache_dir / f"results_{cache_key}.json").write_text(json.dumps(cached))
+
+        res = client.get(f"/cached?lat={lat}&lon={lon}&radius_km={radius}")
+        assert res.status_code == 200
+        assert len(res.get_json()["features"]) == 1
+
+    def test_cached_404_when_missing(self, client):
+        res = client.get("/cached?lat=1&lon=2&radius_km=30")
         assert res.status_code == 404
 
 
