@@ -4,7 +4,7 @@ services:
     expose:
       - "8080"
     volumes:
-      - waterfall-cache:/app/data/cache
+      - ./data/cache:/app/data/cache
     restart: unless-stopped
 
   caddy:
@@ -22,7 +22,6 @@ services:
       - waterfall-finder
 
 volumes:
-  waterfall-cache:
   caddy_data:
   caddy_config:
   caddy_logs:

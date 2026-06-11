@@ -509,6 +509,7 @@ HTML = """<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
   <title>Waterfall Finder</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <link rel="stylesheet" href="https://unpkg.com/leaflet-geosearch@3.11.1/dist/geosearch.css"/>
@@ -516,25 +517,57 @@ HTML = """<!DOCTYPE html>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; height: 100vh; display: flex; flex-direction: column; }
     #toolbar {
-      background: #1a1a2e; color: #eee; padding: 10px 16px;
-      display: flex; align-items: center; gap: 16px; flex-shrink: 0;
+      background: #1a1a2e; color: #eee; padding: 12px 14px;
+      display: flex; flex-direction: column; gap: 10px; flex-shrink: 0;
       box-shadow: 0 2px 6px rgba(0,0,0,0.4);
     }
-    #toolbar h1 { font-size: 1.1rem; font-weight: 600; white-space: nowrap; margin-right: 8px; }
-    #toolbar label { font-size: 0.85rem; color: #aaa; }
-    #toolbar input[type=number] {
-      width: 70px; padding: 4px 6px; border-radius: 4px;
-      border: 1px solid #444; background: #2a2a3e; color: #eee; font-size: 0.9rem;
+    .toolbar-top {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
     }
-    #coords-display { font-size: 0.8rem; color: #8888cc; white-space: nowrap; }
+    #toolbar h1 { font-size: 1.2rem; font-weight: 600; line-height: 1.2; }
+    .toolbar-controls {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    }
+    .toolbar-location {
+      display: flex; flex-direction: column; gap: 2px; flex: 1 1 100%;
+      min-width: 0;
+    }
+    #toolbar label {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 0.9rem; color: #ccc; font-weight: 500;
+    }
+    #toolbar input[type=number] {
+      width: 72px; min-height: 44px; padding: 8px 10px; border-radius: 8px;
+      border: 1px solid #555; background: #2a2a3e; color: #eee; font-size: 1rem;
+    }
+    #coords-display { font-size: 0.88rem; color: #a8b4ff; }
     #search-btn {
-      padding: 7px 18px; background: #4f8ef7; color: #fff; border: none;
-      border-radius: 5px; cursor: pointer; font-size: 0.9rem; font-weight: 600;
-      white-space: nowrap;
+      min-height: 48px; padding: 12px 24px; background: #4f8ef7; color: #fff; border: none;
+      border-radius: 10px; cursor: pointer; font-size: 1rem; font-weight: 600;
+      flex: 1 1 auto;
     }
     #search-btn:hover { background: #3a7ae0; }
     #search-btn:disabled { background: #555; cursor: not-allowed; }
-    #status { font-size: 0.82rem; color: #aaa; white-space: nowrap; }
+    #status {
+      font-size: 0.85rem; color: #aaa; text-align: right;
+      flex: 1 1 auto; min-width: 0;
+    }
+    .hint { font-size: 0.88rem; color: #bbb; }
+    @media (min-width: 769px) {
+      #toolbar {
+        flex-direction: row; flex-wrap: wrap; align-items: center;
+        padding: 10px 16px; gap: 14px;
+      }
+      .toolbar-top { flex: 0 0 auto; }
+      .toolbar-controls { flex: 1 1 auto; flex-wrap: nowrap; gap: 16px; }
+      .toolbar-location { flex: 0 1 auto; flex-direction: row; align-items: center; gap: 12px; }
+      #toolbar h1 { font-size: 1.1rem; white-space: nowrap; }
+      #toolbar input[type=number] { min-height: auto; padding: 4px 6px; font-size: 0.9rem; }
+      #search-btn { min-height: auto; padding: 7px 18px; font-size: 0.9rem; border-radius: 5px; flex: 0 0 auto; }
+      #status { text-align: left; }
+      .hint { font-size: 0.78rem; white-space: nowrap; }
+      #coords-display { font-size: 0.8rem; white-space: nowrap; }
+    }
     #progress-track {
       height: 0; overflow: hidden; background: #12121f; flex-shrink: 0;
       transition: height 0.2s ease;
@@ -563,7 +596,6 @@ HTML = """<!DOCTYPE html>
     .wf-popup { min-width: 180px; }
     .wf-popup b { font-size: 1rem; }
     .wf-popup .stat { color: #555; font-size: 0.85rem; margin-top: 2px; }
-    .hint { font-size: 0.78rem; color: #aaa; white-space: nowrap; }
     #welcome-modal {
       display: none; position: fixed; inset: 0; z-index: 2000;
       background: rgba(0, 0, 0, 0.55); align-items: center; justify-content: center;
@@ -577,8 +609,9 @@ HTML = """<!DOCTYPE html>
     #welcome-modal h2 { font-size: 1.15rem; margin-bottom: 10px; }
     #welcome-modal p { font-size: 0.95rem; line-height: 1.5; color: #444; }
     #welcome-modal button {
-      margin-top: 18px; padding: 8px 20px; background: #4f8ef7; color: #fff;
-      border: none; border-radius: 5px; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+      margin-top: 18px; min-height: 48px; padding: 12px 24px; background: #4f8ef7; color: #fff;
+      border: none; border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer;
+      width: 100%;
     }
     #welcome-modal button:hover { background: #3a7ae0; }
   </style>
@@ -592,14 +625,20 @@ HTML = """<!DOCTYPE html>
   </div>
 </div>
 <div id="toolbar">
-  <h1>💧 Waterfall Finder</h1>
-  <span class="hint">Click map to set center</span>
-  <span id="coords-display">No center set</span>
-  <label>Radius (km)
-    <input type="number" id="radius" value="15" min="1" max="100" step="1"/>
-  </label>
-  <button id="search-btn" onclick="doSearch()">Search</button>
-  <span id="status"></span>
+  <div class="toolbar-top">
+    <h1>💧 Waterfall Finder</h1>
+    <span id="status"></span>
+  </div>
+  <div class="toolbar-controls">
+    <div class="toolbar-location">
+      <span class="hint">Tap the map to choose a search area</span>
+      <span id="coords-display">No center set</span>
+    </div>
+    <label>Radius (km)
+      <input type="number" id="radius" value="15" min="1" max="100" step="1"/>
+    </label>
+    <button id="search-btn" onclick="doSearch()">Search</button>
+  </div>
 </div>
 <div id="progress-track"><div id="progress-bar"></div></div>
 <div id="map"></div>

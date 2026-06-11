@@ -7,7 +7,5 @@ __pycache__/
 .env
 .env.*
 
-data/cache/
-
 .deploy_key
 .deploy_key.pub

@@ -1,0 +1,8 @@
+# Ephemeral or large — built locally, not committed
+jobs/
+analytics.json
+dem_*.tif
+tmp*.tif
+*.tif
+
+# Committed: results_*.json, flowlines_*.json, manifest.json
