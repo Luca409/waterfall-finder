@@ -215,6 +215,26 @@ def get_cached_results(lat, lon, radius_km):
     return None
 
 
+def get_all_cached_features():
+    features = []
+    seen = set()
+    for path in sorted(Path("data/cache").glob("results_*.json")):
+        try:
+            fc = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        for f in fc.get("features", []):
+            coords = f.get("geometry", {}).get("coordinates")
+            if not coords or len(coords) < 2:
+                continue
+            key = (round(coords[0], 5), round(coords[1], 5))
+            if key in seen:
+                continue
+            seen.add(key)
+            features.append(f)
+    return {"type": "FeatureCollection", "features": features}
+
+
 def run_analysis(lat, lon, radius_km, on_progress=None):
     def report(pct, label):
         if on_progress:
@@ -515,7 +535,12 @@ HTML = """<!DOCTYPE html>
   <link rel="stylesheet" href="https://unpkg.com/leaflet-geosearch@3.11.1/dist/geosearch.css"/>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; height: 100vh; display: flex; flex-direction: column; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
     #toolbar {
       background: #1a1a2e; color: #eee; padding: 12px 14px;
       display: flex; flex-direction: column; gap: 10px; flex-shrink: 0;
@@ -553,8 +578,24 @@ HTML = """<!DOCTYPE html>
       flex: 1 1 auto; min-width: 0;
     }
     .hint { font-size: 0.88rem; color: #bbb; }
+    @media (max-width: 768px) {
+      body {
+        padding-bottom: calc(150px + env(safe-area-inset-bottom, 0px));
+      }
+      #toolbar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 1200;
+        padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+      }
+      #status { text-align: left; }
+      #map { min-height: 50vh; }
+    }
     @media (min-width: 769px) {
       #toolbar {
+        position: static;
         flex-direction: row; flex-wrap: wrap; align-items: center;
         padding: 10px 16px; gap: 14px;
       }
@@ -677,7 +718,8 @@ let radiusCircle = null;
 let resultsLayer = L.featureGroup().addTo(map);
 let centerLatLon = null;
 let userHasSetCenter = false;
-let lastResults = null;
+let allCachedFeatures = [];
+const MIN_MARKER_ZOOM = 9;
 
 function dotIcon(color) {
   const { hit, dot } = markerSizes();
@@ -773,10 +815,9 @@ async function pollJob(job_id) {
   }
 }
 
-function renderResults(fc, opts = {}) {
-  lastResults = fc;
+function renderMarkers(features) {
   resultsLayer.clearLayers();
-  fc.features.forEach(f => {
+  features.forEach(f => {
     const p = f.properties;
     const color = sizeColors[p.size] || '#888';
     const marker = L.marker([f.geometry.coordinates[1], f.geometry.coordinates[0]], {
@@ -796,39 +837,47 @@ function renderResults(fc, opts = {}) {
     `);
     resultsLayer.addLayer(marker);
   });
-
-  const count = fc.features.length;
-  if (opts.updateStatus) {
-    document.getElementById('status').textContent =
-      `Found ${count} candidate${count !== 1 ? 's' : ''}.`;
-  }
-  if (opts.fitBounds && count > 0) {
-    const latlngs = fc.features.map(f => [f.geometry.coordinates[1], f.geometry.coordinates[0]]);
-    map.fitBounds(L.latLngBounds(latlngs).pad(0.2));
-  }
 }
 
-async function loadDefaultResults() {
+function visibleCachedFeatures() {
+  if (map.getZoom() < MIN_MARKER_ZOOM) return [];
+  const bounds = map.getBounds();
+  return allCachedFeatures.filter(f => {
+    const [lon, lat] = f.geometry.coordinates;
+    return bounds.contains([lat, lon]);
+  });
+}
+
+function updateVisibleMarkers() {
+  renderMarkers(visibleCachedFeatures());
+}
+
+function fitFeatureBounds(features) {
+  if (!features.length) return;
+  const latlngs = features.map(f => [f.geometry.coordinates[1], f.geometry.coordinates[0]]);
+  map.fitBounds(L.latLngBounds(latlngs).pad(0.2));
+}
+
+async function loadAllCached() {
   clearSearchOverlay();
   try {
-    const params = new URLSearchParams({
-      lat: DEFAULT_LAT,
-      lon: DEFAULT_LON,
-      radius_km: DEFAULT_RADIUS_KM,
-    });
-    const res = await fetch(`/cached?${params}`);
+    const res = await fetch('/cached/all');
     if (!res.ok) return;
-    renderResults(await res.json(), { fitBounds: true });
+    const fc = await res.json();
+    allCachedFeatures = fc.features || [];
+    updateVisibleMarkers();
   } catch (e) {}
 }
 
+map.on('moveend zoomend', updateVisibleMarkers);
+
 window.addEventListener('resize', () => {
   map.options.tapTolerance = isCoarsePointer() ? 25 : 15;
-  if (lastResults) renderResults(lastResults);
+  updateVisibleMarkers();
   if (userHasSetCenter && centerLatLon) setSearchCenter(centerLatLon);
 });
 
-loadDefaultResults();
+loadAllCached();
 
 async function doSearch() {
   if (!centerLatLon) { alert('Click the map to set a search center first.'); return; }
@@ -837,7 +886,6 @@ async function doSearch() {
   const status = document.getElementById('status');
   btn.disabled = true;
   setProgress(2, 'Starting search…');
-  resultsLayer.clearLayers();
 
   try {
     const startRes = await fetch('/search', {
@@ -853,7 +901,10 @@ async function doSearch() {
     if (!job_id) throw new Error('No job id returned');
 
     const fc = await pollJob(job_id);
-    renderResults(fc, { fitBounds: true, updateStatus: true });
+    const count = fc.features.length;
+    status.textContent = `Found ${count} candidate${count !== 1 ? 's' : ''}.`;
+    await loadAllCached();
+    fitFeatureBounds(fc.features);
   } catch(e) {
     status.textContent = 'Request failed: ' + e.message;
     hideProgress();
@@ -948,6 +999,13 @@ def _parse_search_params(data):
     if radius_km > 150:
         raise ValueError("Radius too large (max 150 km)")
     return lat, lon, radius_km
+
+
+@app.route("/cached/all")
+@limiter.limit("30 per minute")
+def cached_all():
+    record_event("preload", path="/cached/all", ip=client_ip())
+    return jsonify(get_all_cached_features())
 
 
 @app.route("/cached")

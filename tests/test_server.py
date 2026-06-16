@@ -11,6 +11,7 @@ from server import (
     app,
     create_job,
     dem_tile_urls,
+    get_all_cached_features,
     get_cached_results,
     get_job,
     radius_bbox,
@@ -188,6 +189,40 @@ class TestRoutes:
     def test_cached_404_when_missing(self, client):
         res = client.get("/cached?lat=1&lon=2&radius_km=30")
         assert res.status_code == 404
+
+    def test_cached_all_merges_results(self, client, isolated_jobs, monkeypatch):
+        monkeypatch.chdir(isolated_jobs.parent.parent.parent)
+        cache_dir = isolated_jobs.parent
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        for i, lon in enumerate([-74.4, -74.5]):
+            fc = {
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [lon, 42.4 + i * 0.1]},
+                    "properties": {"stream": f"Creek {i}", "drop_m": 10, "elevation_m": 300, "size": "small"},
+                }],
+            }
+            (cache_dir / f"results_key{i}.json").write_text(json.dumps(fc))
+
+        res = client.get("/cached/all")
+        assert res.status_code == 200
+        assert len(res.get_json()["features"]) == 2
+
+    def test_get_all_cached_features_dedupes(self, isolated_jobs, monkeypatch):
+        cache_dir = isolated_jobs.parent
+        monkeypatch.chdir(isolated_jobs.parent.parent.parent)
+        dup = {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [-74.4, 42.4]},
+                "properties": {"stream": "A", "drop_m": 10, "elevation_m": 300, "size": "small"},
+            }],
+        }
+        (cache_dir / "results_a.json").write_text(json.dumps(dup))
+        (cache_dir / "results_b.json").write_text(json.dumps(dup))
+        assert len(get_all_cached_features()["features"]) == 1
 
     def test_stats_is_public(self, client):
         res = client.get("/stats")
