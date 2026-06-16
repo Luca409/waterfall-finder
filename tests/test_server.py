@@ -7,6 +7,11 @@ import pytest
 
 import analytics
 from server import (
+    ALGORITHM_VERSION,
+    _best_short_drop,
+    _is_candidate_flowline,
+    _passes_profile_filter,
+    _profile_confidence_score,
     _sse,
     app,
     create_job,
@@ -167,6 +172,7 @@ class TestRoutes:
         cache_key = results_cache_key(lat, lon, radius)
         cached = {
             "type": "FeatureCollection",
+            "algorithm_version": ALGORITHM_VERSION,
             "features": [
                 {
                     "type": "Feature",
@@ -197,6 +203,7 @@ class TestRoutes:
         for i, lon in enumerate([-74.4, -74.5]):
             fc = {
                 "type": "FeatureCollection",
+                "algorithm_version": ALGORITHM_VERSION,
                 "features": [{
                     "type": "Feature",
                     "geometry": {"type": "Point", "coordinates": [lon, 42.4 + i * 0.1]},
@@ -214,6 +221,7 @@ class TestRoutes:
         monkeypatch.chdir(isolated_jobs.parent.parent.parent)
         dup = {
             "type": "FeatureCollection",
+            "algorithm_version": ALGORITHM_VERSION,
             "features": [{
                 "type": "Feature",
                 "geometry": {"type": "Point", "coordinates": [-74.4, 42.4]},
@@ -223,6 +231,66 @@ class TestRoutes:
         (cache_dir / "results_a.json").write_text(json.dumps(dup))
         (cache_dir / "results_b.json").write_text(json.dumps(dup))
         assert len(get_all_cached_features()["features"]) == 1
+
+    def test_get_all_cached_features_deletes_incomplete_results(self, isolated_jobs, monkeypatch):
+        cache_dir = isolated_jobs.parent
+        monkeypatch.chdir(isolated_jobs.parent.parent.parent)
+        stale_path = cache_dir / "results_stale.json"
+        stale_path.write_text(json.dumps({
+            "type": "FeatureCollection",
+            "algorithm_version": ALGORITHM_VERSION,
+            "features": [{
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [-74.4, 42.4]},
+                "properties": {"stream": "Old Creek", "drop_m": 10, "elevation_m": 300},
+            }],
+        }))
+
+        assert get_all_cached_features()["features"] == []
+        assert not stale_path.exists()
+
+    def test_get_cached_results_rejects_old_algorithm_cache(self, isolated_jobs, monkeypatch):
+        cache_dir = isolated_jobs.parent
+        monkeypatch.chdir(isolated_jobs.parent.parent.parent)
+        lat, lon, radius = 42.42457, -74.40353, 30
+        cache_key = results_cache_key(lat, lon, radius)
+        old_path = cache_dir / f"results_{cache_key}.json"
+        old_path.write_text(json.dumps({
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [-74.4, 42.4]},
+                "properties": {"stream": "Old Creek", "drop_m": 10, "elevation_m": 300, "size": "small"},
+            }],
+        }))
+
+        assert get_cached_results(lat, lon, radius) is None
+        assert not old_path.exists()
+
+    def test_get_all_cached_features_dedupes_nearby_points(self, isolated_jobs, monkeypatch):
+        cache_dir = isolated_jobs.parent
+        monkeypatch.chdir(isolated_jobs.parent.parent.parent)
+        fc = {
+            "type": "FeatureCollection",
+            "algorithm_version": ALGORITHM_VERSION,
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [-74.40000, 42.40000]},
+                    "properties": {"stream": "A", "drop_m": 20, "elevation_m": 300, "size": "medium"},
+                },
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [-74.40010, 42.40010]},
+                    "properties": {"stream": "A", "drop_m": 12, "elevation_m": 295, "size": "medium"},
+                },
+            ],
+        }
+        (cache_dir / "results_nearby.json").write_text(json.dumps(fc))
+
+        features = get_all_cached_features()["features"]
+        assert len(features) == 1
+        assert features[0]["properties"]["drop_m"] == 20
 
     def test_stats_is_public(self, client):
         res = client.get("/stats")
@@ -241,6 +309,7 @@ class TestRunAnalysis:
 
         cached = {
             "type": "FeatureCollection",
+            "algorithm_version": ALGORITHM_VERSION,
             "features": [
                 {
                     "type": "Feature",
@@ -263,6 +332,31 @@ class TestRunAnalysis:
 
         assert result == cached
         assert progress == [(100, "Using cached results")]
+
+    def test_profile_filter_rejects_gradual_ravine_drop(self):
+        assert not _passes_profile_filter(drop50=12.0, sharp_drop=4.0, upstream_km=25.0)
+
+    def test_profile_filter_rejects_small_tributary_without_anchor(self):
+        assert not _passes_profile_filter(drop50=20.0, sharp_drop=10.0, upstream_km=2.0)
+
+    def test_scoring_keeps_major_sharp_drops_on_short_streams(self):
+        assert _passes_profile_filter(drop50=52.9, sharp_drop=34.0, upstream_km=1.8)
+
+    def test_scoring_keeps_panther_and_keyser_like_profiles(self):
+        assert _passes_profile_filter(drop50=22.6, sharp_drop=17.9, upstream_km=9.9)
+        assert _passes_profile_filter(drop50=21.6, sharp_drop=12.1, upstream_km=38.7)
+
+    def test_confidence_score_combines_drop_sharpness_and_upstream_length(self):
+        assert _profile_confidence_score(drop50=52.9, sharp_drop=34.0, upstream_km=1.8) >= 5
+        assert _profile_confidence_score(drop50=12.0, sharp_drop=4.0, upstream_km=25.0) < 5
+
+    def test_short_drop_measures_local_sharpness(self):
+        profile = [100, 99, 98, 90, 89, 88]
+        assert _best_short_drop(profile, start_idx=0, long_k=5, short_k=2) == 9.0
+
+    def test_flowline_filter_excludes_artificial_features(self):
+        assert _is_candidate_flowline({"ftype": 460, "fcode": 46006})
+        assert not _is_candidate_flowline({"ftype": 558, "fcode": 55800})
 
 
 class TestRateLimit:

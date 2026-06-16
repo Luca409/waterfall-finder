@@ -38,6 +38,17 @@ MAX_CONCURRENT_JOBS_PER_IP = 1
 DEFAULT_LAT = 42.42457
 DEFAULT_LON = -74.40353
 DEFAULT_RADIUS_KM = 15
+ALGORITHM_VERSION = 3
+VALID_SIZES = {"small", "medium", "big"}
+REQUIRED_FEATURE_PROPS = {"stream", "drop_m", "elevation_m", "size"}
+STREAM_FTYPE = 460
+EXCLUDED_FTYPES = {336, 343, 558}
+MIN_PROFILE_DROP_M = 12.0
+SHORT_WINDOW_M = 20.0
+MIN_SHARP_DROP_M = 8.0
+MIN_SHARP_RATIO = 0.45
+MIN_CONFIDENCE_SCORE = 5
+CACHE_DEDUPE_M = 150.0
 
 
 @app.errorhandler(429)
@@ -181,6 +192,37 @@ def fetch_flowlines(W, S, E, N, cache_key, on_progress=None):
     return fc
 
 
+def fetch_official_water_features(W, S, E, N, cache_key):
+    feature_path = f"data/cache/official_waterfalls_{cache_key}.json"
+    if os.path.exists(feature_path):
+        return json.load(open(feature_path))
+
+    bbox_str = f"{W:.4f},{S:.4f},{E:.4f},{N:.4f}"
+    features = []
+    for layer_id in (487, 431):  # NHD Waterfall, Rapids
+        base = f"https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/{layer_id}/query"
+        params = {
+            "geometry": bbox_str, "geometryType": "esriGeometryEnvelope", "inSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": "gnis_name,ftype,fcode",
+            "returnGeometry": "true", "outSR": "4326", "f": "geojson",
+        }
+        req = urllib.request.Request(
+            base + "?" + urllib.parse.urlencode(params),
+            headers={"User-Agent": "research"}
+        )
+        try:
+            data = json.load(urlopen(req, timeout=60))
+        except Exception as e:
+            print(f"  Warning: skipping official water feature layer {layer_id}: {e}")
+            continue
+        features.extend(data.get("features", []))
+
+    fc = {"type": "FeatureCollection", "features": features}
+    json.dump(fc, open(feature_path, "w"))
+    return fc
+
+
 # ---------------------------------------------------------------------------
 # Core analysis
 # ---------------------------------------------------------------------------
@@ -189,6 +231,192 @@ def results_cache_key(lat, lon, radius_km):
     W, S, E, N = radius_bbox(lat, lon, radius_km)
     bbox_sig = f"{W:.3f}{S:.3f}{E:.3f}{N:.3f}"
     return hashlib.md5(bbox_sig.encode()).hexdigest()[:10]
+
+
+def _feature_distance_m(a_lon, a_lat, b_lon, b_lat):
+    mean_lat = math.radians((a_lat + b_lat) / 2.0)
+    dx = (a_lon - b_lon) * 111_320.0 * math.cos(mean_lat)
+    dy = (a_lat - b_lat) * 110_540.0
+    return math.hypot(dx, dy)
+
+
+def _is_valid_size(value):
+    return value in VALID_SIZES
+
+
+def _valid_cache_feature(feature):
+    if feature.get("type") != "Feature":
+        return False
+    coords = feature.get("geometry", {}).get("coordinates")
+    if not coords or len(coords) < 2:
+        return False
+    props = feature.get("properties", {})
+    if not REQUIRED_FEATURE_PROPS.issubset(props):
+        return False
+    if not _is_valid_size(props.get("size")):
+        return False
+    try:
+        float(coords[0])
+        float(coords[1])
+        float(props["drop_m"])
+        float(props["elevation_m"])
+    except (TypeError, ValueError):
+        return False
+    return bool(str(props.get("stream", "")).strip())
+
+
+def _sanitize_cached_results(fc, path=None):
+    if fc.get("algorithm_version") != ALGORITHM_VERSION:
+        if path:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        return None
+
+    valid_features = [f for f in fc.get("features", []) if _valid_cache_feature(f)]
+    if len(valid_features) != len(fc.get("features", [])):
+        if valid_features:
+            fc = {**fc, "features": valid_features}
+            if path:
+                path.write_text(json.dumps(fc))
+        elif path:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return None
+    return {**fc, "features": valid_features}
+
+
+def _cache_result(features):
+    return {
+        "type": "FeatureCollection",
+        "algorithm_version": ALGORITHM_VERSION,
+        "features": features,
+    }
+
+
+def _flowline_type(properties):
+    ftype = properties.get("ftype")
+    fcode = properties.get("fcode")
+    try:
+        if ftype is not None:
+            return int(ftype)
+        if fcode is not None:
+            return int(fcode) // 100
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _is_candidate_flowline(properties):
+    ftype = _flowline_type(properties)
+    if ftype in EXCLUDED_FTYPES:
+        return False
+    if ftype is None:
+        return True
+    return ftype == STREAM_FTYPE
+
+
+def _size_for_drop(drop):
+    if drop >= 25:
+        return "big"
+    if drop >= 12:
+        return "medium"
+    return "small"
+
+
+def _best_short_drop(zm, start_idx, long_k, short_k):
+    end = min(start_idx + long_k - short_k, len(zm) - short_k - 1)
+    if end < start_idx:
+        return 0.0
+    short_drops = [float(zm[i] - zm[i + short_k]) for i in range(start_idx, end + 1)]
+    return max(short_drops) if short_drops else 0.0
+
+
+def _profile_confidence_score(drop50, sharp_drop, upstream_km):
+    if drop50 < MIN_PROFILE_DROP_M:
+        return 0
+
+    score = 0
+    if drop50 >= 12:
+        score += 1
+    if drop50 >= 20:
+        score += 1
+    if drop50 >= 35:
+        score += 1
+    if drop50 >= 50:
+        score += 1
+
+    if sharp_drop >= max(MIN_SHARP_DROP_M, drop50 * MIN_SHARP_RATIO):
+        score += 2
+    elif sharp_drop >= MIN_SHARP_DROP_M:
+        score += 1
+    if sharp_drop >= 20:
+        score += 1
+
+    if upstream_km >= 8:
+        score += 2
+    elif upstream_km >= 3:
+        score += 1
+
+    return score
+
+
+def _passes_profile_filter(drop50, sharp_drop, upstream_km):
+    return _profile_confidence_score(drop50, sharp_drop, upstream_km) >= MIN_CONFIDENCE_SCORE
+
+
+def _official_point_features(fc, lat, lon, radius_km, sample_elev=None):
+    features = []
+    for f in fc.get("features", []):
+        coords = f.get("geometry", {}).get("coordinates")
+        if not coords or len(coords) < 2:
+            continue
+        try:
+            point_lon, point_lat = float(coords[0]), float(coords[1])
+        except (TypeError, ValueError):
+            continue
+        dist_km = math.sqrt((point_lat - lat)**2 + (point_lon - lon)**2) * 111.0
+        if dist_km > radius_km:
+            continue
+        props = f.get("properties", {})
+        name = (props.get("gnis_name") or "Official waterfall/rapids").strip()
+        elevation = None
+        if sample_elev:
+            try:
+                elevation = round(float(sample_elev([point_lon], [point_lat])[0]))
+            except (TypeError, ValueError, IndexError):
+                elevation = None
+        features.append({
+            "lat": point_lat,
+            "lon": point_lon,
+            "stream": name,
+            "drop_m": MIN_PROFILE_DROP_M,
+            "elevation_m": elevation if elevation is not None else 0,
+            "size": "medium",
+            "upstream_km": None,
+            "sharp_drop_m": None,
+            "confidence": "official",
+            "source": "nhd_official",
+        })
+    return features
+
+
+def _dedupe_features_by_distance(features):
+    deduped = []
+    for f in sorted(features, key=lambda x: x.get("properties", {}).get("drop_m", 0), reverse=True):
+        lon, lat = f["geometry"]["coordinates"][:2]
+        duplicate = False
+        for existing in deduped:
+            e_lon, e_lat = existing["geometry"]["coordinates"][:2]
+            if _feature_distance_m(lon, lat, e_lon, e_lat) < CACHE_DEDUPE_M:
+                duplicate = True
+                break
+        if not duplicate:
+            deduped.append(f)
+    return deduped
 
 
 def _grid_has_neighbor(grid, p, cell_size, merge_dist, items):
@@ -209,30 +437,32 @@ def _grid_add(grid, p, cell_size, items):
 
 def get_cached_results(lat, lon, radius_km):
     cache_key = results_cache_key(lat, lon, radius_km)
-    results_path = f"data/cache/results_{cache_key}.json"
-    if os.path.exists(results_path):
-        return json.load(open(results_path))
+    results_path = Path(f"data/cache/results_{cache_key}.json")
+    if results_path.exists():
+        try:
+            return _sanitize_cached_results(json.loads(results_path.read_text()), results_path)
+        except (json.JSONDecodeError, OSError):
+            try:
+                results_path.unlink()
+            except OSError:
+                pass
     return None
 
 
 def get_all_cached_features():
     features = []
-    seen = set()
     for path in sorted(Path("data/cache").glob("results_*.json")):
         try:
-            fc = json.loads(path.read_text())
+            fc = _sanitize_cached_results(json.loads(path.read_text()), path)
         except (json.JSONDecodeError, OSError):
+            continue
+        if not fc:
             continue
         for f in fc.get("features", []):
             coords = f.get("geometry", {}).get("coordinates")
-            if not coords or len(coords) < 2:
-                continue
-            key = (round(coords[0], 5), round(coords[1], 5))
-            if key in seen:
-                continue
-            seen.add(key)
             features.append(f)
-    return {"type": "FeatureCollection", "features": features}
+
+    return _cache_result(_dedupe_features_by_distance(features))
 
 
 def run_analysis(lat, lon, radius_km, on_progress=None):
@@ -257,6 +487,7 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
     report(5, "Fetching stream network…")
     print(f"Fetching NHD flowlines...")
     flowlines_fc = fetch_flowlines(W, S, E, N, cache_key, on_progress=on_progress)
+    official_fc = fetch_official_water_features(W, S, E, N, cache_key)
 
     report(30, "Fetching elevation data…")
     print(f"Fetching DEM...")
@@ -276,6 +507,9 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
     print("Building stream network...")
     segs = []
     for f in flowlines_fc["features"]:
+        props = f.get("properties", {})
+        if not _is_candidate_flowline(props):
+            continue
         try:
             g = shape(f["geometry"])
         except Exception:
@@ -300,8 +534,9 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
             segs.append({
                 "geom": gu, "len": gu.length,
                 "up": grid_key(up), "dn": grid_key(dn),
-                "name": (f["properties"].get("gnis_name") or "").strip(),
-                "fcode": f["properties"].get("fcode"),
+                "name": (props.get("gnis_name") or "").strip(),
+                "ftype": props.get("ftype"),
+                "fcode": props.get("fcode"),
             })
 
     print(f"  {len(segs)} segments")
@@ -326,8 +561,8 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
     # Scan elevation profiles for steep drops
     STEP_M   = 10.0
     WINDOW_M = 50
-    MIN_DROP = 4.0
     k = int(WINDOW_M / STEP_M)
+    short_k = max(1, int(SHORT_WINDOW_M / STEP_M))
 
     report(68, "Scanning elevation profiles…")
     print("Scanning elevation profiles...")
@@ -350,7 +585,8 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
         if len(zm) <= k:
             continue
         drops = zm[:-k] - zm[k:]
-        for j in np.where(drops >= MIN_DROP)[0]:
+        upstream_km = memo[si] / 1000.0
+        for j in np.where(drops >= MIN_PROFILE_DROP_M)[0]:
             mid = j + k // 2
             pt_lon = float(lons_arr[mid])
             pt_lat = float(lats_arr[mid])
@@ -358,14 +594,22 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
             dist_km = math.sqrt((pt_lat - lat)**2 + (pt_lon - lon)**2) * 111.0
             if dist_km > radius_km:
                 continue
+            stream = s["name"]
+            if not stream:
+                continue
+            sharp_drop = _best_short_drop(zm, j, k, short_k)
+            confidence_score = _profile_confidence_score(float(drops[j]), sharp_drop, upstream_km)
+            if confidence_score < MIN_CONFIDENCE_SCORE:
+                continue
             hits.append({
                 "si": si, "lat": pt_lat, "lon": pt_lon,
-                "drop50": float(drops[j]), "elev": float(zm[mid])
+                "drop50": float(drops[j]), "elev": float(zm[mid]),
+                "sharp_drop": sharp_drop, "upstream_km": upstream_km,
+                "confidence_score": confidence_score,
             })
 
     print(f"  {len(hits)} raw hits")
-    src_dem.close()
-    del dem_data, src_dem, flowlines_fc
+    del flowlines_fc
     report(92, "Clustering waterfall candidates…")
 
     # Cluster within 120m (grid index avoids O(n^2) over large hit sets)
@@ -385,29 +629,29 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
     sites = []
     site_grid = {}
     for c in sorted(clusters, key=lambda x: -x["drop50"]):
-        if c["drop50"] < 6:
-            continue
         p = c["_p"]
-        if _grid_has_neighbor(site_grid, p, 400, 400, sites):
-            continue
-        if not c["stream"]:
+        if _grid_has_neighbor(site_grid, p, 600, 600, sites):
             continue
         drop = round(c["drop50"], 1)
-        if drop >= 25:
-            size = "big"
-        elif drop >= 12:
-            size = "medium"
-        else:
-            size = "small"
         sites.append({
-            "lat": c["lat"], "lon": c["lon"],
+            "lat": c["lat"],
+            "lon": c["lon"],
             "stream": c["stream"],
             "drop_m": drop,
             "elevation_m": round(c["elev"]),
-            "size": size,
+            "size": _size_for_drop(drop),
+            "upstream_km": round(c["upstream_km"], 1),
+            "sharp_drop_m": round(c["sharp_drop"], 1),
+            "confidence": "high",
+            "confidence_score": c["confidence_score"],
+            "source": "dem_profile",
             "_p": p,
         })
-        _grid_add(site_grid, p, 400, sites)
+        _grid_add(site_grid, p, 600, sites)
+
+    sites.extend(_official_point_features(official_fc, lat, lon, radius_km, sample_elev=sample_elev))
+    src_dem.close()
+    del dem_data, src_dem
 
     print(f"  {len(sites)} waterfall candidates")
     report(98, f"Found {len(sites)} candidates")
@@ -421,11 +665,16 @@ def run_analysis(lat, lon, radius_km, on_progress=None):
                 "drop_m": s["drop_m"],
                 "elevation_m": s["elevation_m"],
                 "size": s["size"],
+                "upstream_km": s["upstream_km"],
+                "sharp_drop_m": s["sharp_drop_m"],
+                "confidence": s["confidence"],
+                "confidence_score": s.get("confidence_score"),
+                "source": s["source"],
             },
         }
         for s in sorted(sites, key=lambda x: -x["drop_m"])
     ]
-    result = {"type": "FeatureCollection", "features": features}
+    result = _cache_result(_dedupe_features_by_distance(features))
     json.dump(result, open(results_path, "w"))
     print(f"  Results cached → {results_path}")
     report(100, "Done")
@@ -824,14 +1073,17 @@ function renderMarkers(features) {
       icon: dotIcon(color),
       zIndexOffset: p.size === 'big' ? 200 : p.size === 'medium' ? 100 : 0,
     });
+    const lat = f.geometry.coordinates[1];
+    const lon = f.geometry.coordinates[0];
     marker.bindPopup(`
       <div class="wf-popup">
         <b>${p.stream}</b>
         <div class="stat">Drop: <b>${p.drop_m} m</b> over 50 m window</div>
         <div class="stat">Elevation: ${p.elevation_m} m</div>
         <div class="stat">Size: likely ${p.size} waterfall</div>
+        <div class="stat">${lat.toFixed(5)}, ${lon.toFixed(5)}</div>
         <div style="margin-top:6px">
-          <a href="https://www.google.com/maps?q=${f.geometry.coordinates[1]},${f.geometry.coordinates[0]}" target="_blank">Open in Google Maps</a>
+          <a href="https://www.google.com/maps?q=${lat},${lon}" target="_blank">Open in Google Maps</a>
         </div>
       </div>
     `);
@@ -904,7 +1156,6 @@ async function doSearch() {
     const count = fc.features.length;
     status.textContent = `Found ${count} candidate${count !== 1 ? 's' : ''}.`;
     await loadAllCached();
-    fitFeatureBounds(fc.features);
   } catch(e) {
     status.textContent = 'Request failed: ' + e.message;
     hideProgress();
