@@ -815,13 +815,19 @@ HTML = """<!DOCTYPE html>
       border: 1px solid #555; background: #2a2a3e; color: #eee; font-size: 1rem;
     }
     #coords-display { font-size: 0.88rem; color: #a8b4ff; }
-    #search-btn {
+    #search-btn, .complaints-link {
       min-height: 48px; padding: 12px 24px; background: #4f8ef7; color: #fff; border: none;
       border-radius: 10px; cursor: pointer; font-size: 1rem; font-weight: 600;
       flex: 1 1 auto;
     }
     #search-btn:hover { background: #3a7ae0; }
     #search-btn:disabled { background: #555; cursor: not-allowed; }
+    .complaints-link {
+      display: inline-flex; align-items: center; justify-content: center;
+      background: transparent; border: 1px solid #6b7280; color: #eee;
+      text-decoration: none; flex: 0 0 auto; margin-left: auto;
+    }
+    .complaints-link:hover { background: rgba(255,255,255,0.08); }
     #status {
       font-size: 0.85rem; color: #aaa; text-align: right;
       flex: 1 1 auto; min-width: 0;
@@ -839,6 +845,17 @@ HTML = """<!DOCTYPE html>
         z-index: 1200;
         padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
       }
+      .complaints-link {
+        position: absolute;
+        top: 18px;
+        right: 28px;
+        min-height: auto;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 0.82rem;
+        flex: 0 0 auto;
+        margin-left: 0;
+      }
       #status { text-align: left; }
       #map { min-height: 50vh; }
     }
@@ -854,6 +871,10 @@ HTML = """<!DOCTYPE html>
       #toolbar h1 { font-size: 1.1rem; white-space: nowrap; }
       #toolbar input[type=number] { min-height: auto; padding: 4px 6px; font-size: 0.9rem; }
       #search-btn { min-height: auto; padding: 7px 18px; font-size: 0.9rem; border-radius: 5px; flex: 0 0 auto; }
+      .complaints-link {
+        min-height: auto; padding: 6px 12px; font-size: 0.85rem;
+        border-radius: 5px; flex: 0 0 auto;
+      }
       #status { text-align: left; }
       .hint { font-size: 0.78rem; white-space: nowrap; }
       #coords-display { font-size: 0.8rem; white-space: nowrap; }
@@ -928,6 +949,7 @@ HTML = """<!DOCTYPE html>
       <input type="number" id="radius" value="15" min="1" max="100" step="1"/>
     </label>
     <button id="search-btn" onclick="doSearch()">Search</button>
+    <a class="complaints-link" href="https://waterfallfinder.featurebase.app/" target="_blank" rel="noopener noreferrer">Complaints</a>
   </div>
 </div>
 <div id="progress-track"><div id="progress-bar"></div></div>
