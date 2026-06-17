@@ -295,7 +295,10 @@ class TestRoutes:
     def test_stats_is_public(self, client):
         res = client.get("/stats")
         assert res.status_code == 200
-        assert "Waterfall Finder traffic" in res.get_data(as_text=True)
+        text = res.get_data(as_text=True)
+        assert "Waterfall Finder traffic" in text
+        assert "Humans" in text
+        assert "Bot scrapers" in text
 
 
 class TestRunAnalysis:

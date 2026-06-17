@@ -28,6 +28,10 @@ def client_ip():
     return get_remote_address()
 
 
+def client_user_agent():
+    return request.headers.get("User-Agent", "")
+
+
 limiter = Limiter(
     app=app,
     key_func=client_ip,
@@ -1194,13 +1198,17 @@ async function doSearch() {
 
 def _stats_page(data):
     rows = "".join(
-        f"<tr><td>{r['date']}</td><td>{r['unique_visitors']}</td>"
-        f"<td>{r['page_views']}</td><td>{r['preloads']}</td>"
-        f"<td>{r['searches']}</td><td>{r['searches_done']}</td></tr>"
+        f"<tr><td>{r['date']}</td>"
+        f"<td>{r['human_visitors']}</td><td>{r['bot_visitors']}</td>"
+        f"<td>{r['human_page_views']}</td><td>{r['bot_page_views']}</td>"
+        f"<td>{r['human_preloads']}</td><td>{r['human_searches']}</td>"
+        f"<td>{r['searches_done']}</td></tr>"
         for r in data["daily"]
-    ) or "<tr><td colspan='6'>No traffic yet</td></tr>"
+    ) or "<tr><td colspan='8'>No traffic yet</td></tr>"
     recent = "".join(
-        f"<li><code>{e['ts']}</code> {e['event']} <span>{e['path']}</span></li>"
+        f"<li><code>{e['ts']}</code> "
+        f"<span class='tag {e.get('kind', 'human')}'>{e.get('kind', 'human')}</span> "
+        f"{e['event']} <span>{e['path']}</span></li>"
         for e in data["recent"]
     ) or "<li>No recent activity</li>"
     t = data["totals"]
@@ -1211,38 +1219,53 @@ def _stats_page(data):
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #222; }}
     h1 {{ font-size: 1.4rem; }}
-    table {{ border-collapse: collapse; margin: 16px 0 24px; }}
+    h2 {{ font-size: 1.1rem; margin-top: 28px; }}
+    table {{ border-collapse: collapse; margin: 16px 0 24px; font-size: 0.92rem; }}
     th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
     th {{ background: #f5f5f5; }}
     .cards {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }}
     .card {{ background: #f8f9fb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 16px; min-width: 120px; }}
-    .card.users {{ background: #eef4ff; border-color: #c7d9f7; }}
+    .card.humans {{ background: #eef4ff; border-color: #c7d9f7; }}
+    .card.bots {{ background: #fff8ee; border-color: #f0d9a8; }}
     .card strong {{ display: block; font-size: 1.5rem; }}
     li {{ margin: 4px 0; }}
     li span {{ color: #666; }}
+    .tag {{ display: inline-block; font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
+            padding: 1px 6px; border-radius: 4px; color: #fff; }}
+    .tag.human {{ background: #4f8ef7; }}
+    .tag.bot {{ background: #c07a1a; }}
     .meta {{ color: #666; font-size: 0.9rem; }}
   </style>
 </head><body>
   <h1>Waterfall Finder traffic</h1>
-  <p class="meta">Updated {data['updated_at']} UTC · users counted by hashed IP on homepage visits</p>
-  <h2>Users</h2>
+  <p class="meta">Updated {data['updated_at']} UTC · humans vs bots classified by User-Agent on each request</p>
+  <h2>Humans</h2>
   <div class="cards">
-    <div class="card users"><strong>{t['unique_visitors_today']}</strong> users today</div>
-    <div class="card users"><strong>{t['new_visitors_today']}</strong> new users today</div>
-    <div class="card users"><strong>{t['unique_visitors_7d']}</strong> users last 7 days</div>
-    <div class="card users"><strong>{t['unique_visitors_all_time']}</strong> users all time</div>
+    <div class="card humans"><strong>{t['human_visitors_today']}</strong> today</div>
+    <div class="card humans"><strong>{t['new_human_visitors_today']}</strong> new today</div>
+    <div class="card humans"><strong>{t['human_visitors_7d']}</strong> last 7 days</div>
+    <div class="card humans"><strong>{t['human_visitors_all_time']}</strong> all time</div>
+  </div>
+  <h2>Bot scrapers</h2>
+  <div class="cards">
+    <div class="card bots"><strong>{t['bot_visitors_today']}</strong> today</div>
+    <div class="card bots"><strong>{t['bot_visitors_7d']}</strong> last 7 days</div>
+    <div class="card bots"><strong>{t['bot_visitors_all_time']}</strong> all time</div>
   </div>
   <h2>Activity</h2>
   <div class="cards">
-    <div class="card"><strong>{t['page_views']}</strong> page views</div>
-    <div class="card"><strong>{t['preloads']}</strong> map preloads</div>
-    <div class="card"><strong>{t['searches']}</strong> searches started</div>
+    <div class="card humans"><strong>{t['human_page_views']}</strong> human page views</div>
+    <div class="card bots"><strong>{t['bot_page_views']}</strong> bot page views</div>
+    <div class="card humans"><strong>{t['human_preloads']}</strong> human preloads</div>
+    <div class="card bots"><strong>{t['bot_preloads']}</strong> bot preloads</div>
+    <div class="card humans"><strong>{t['human_searches']}</strong> human searches</div>
     <div class="card"><strong>{t['searches_done']}</strong> searches finished</div>
     <div class="card"><strong>{t['search_errors']}</strong> search errors</div>
   </div>
   <h2>Last 14 days</h2>
   <table>
-    <tr><th>Date</th><th>Unique visitors</th><th>Page views</th><th>Preloads</th><th>Searches</th><th>Finished</th></tr>
+    <tr><th>Date</th><th>Humans</th><th>Bots</th><th>Human views</th><th>Bot views</th>
+        <th>Human preloads</th><th>Human searches</th><th>Finished</th></tr>
     {rows}
   </table>
   <h2>Recent activity</h2>
@@ -1252,7 +1275,7 @@ def _stats_page(data):
 
 @app.route("/")
 def index():
-    record_event("page_view", path="/", ip=client_ip())
+    record_event("page_view", path="/", ip=client_ip(), user_agent=client_user_agent())
     return HTML
 
 
@@ -1277,7 +1300,7 @@ def _parse_search_params(data):
 @app.route("/cached/all")
 @limiter.limit("30 per minute")
 def cached_all():
-    record_event("preload", path="/cached/all", ip=client_ip())
+    record_event("preload", path="/cached/all", ip=client_ip(), user_agent=client_user_agent())
     return jsonify(get_all_cached_features())
 
 
@@ -1296,7 +1319,7 @@ def cached():
     result = get_cached_results(lat, lon, radius_km)
     if result is None:
         return jsonify({"error": "No cached results"}), 404
-    record_event("preload", path="/cached", ip=client_ip())
+    record_event("preload", path="/cached", ip=client_ip(), user_agent=client_user_agent())
     return jsonify(result)
 
 
@@ -1314,7 +1337,7 @@ def search():
         return jsonify({"error": "Too many searches in progress. Please wait."}), 429
 
     job_id = create_job(lat, lon, radius_km, client_ip=ip)
-    record_event("search", path="/search", ip=ip)
+    record_event("search", path="/search", ip=ip, user_agent=client_user_agent())
     start_job(job_id, lat, lon, radius_km)
 
     if request.headers.get("Accept") == "application/json" and request.args.get("wait") == "1":
