@@ -16,7 +16,7 @@ from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-from analytics import record as record_event, summary as analytics_summary
+from analytics import is_bot, record as record_event, summary as analytics_summary
 
 app = Flask(__name__)
 
@@ -1155,6 +1155,7 @@ window.addEventListener('resize', () => {
   if (userHasSetCenter && centerLatLon) setSearchCenter(centerLatLon);
 });
 
+fetch('/hit', {method: 'POST', keepalive: true}).catch(() => {});
 loadAllCached();
 
 async function doSearch() {
@@ -1238,7 +1239,7 @@ def _stats_page(data):
   </style>
 </head><body>
   <h1>Waterfall Finder traffic</h1>
-  <p class="meta">Updated {data['updated_at']} UTC · humans vs bots classified by User-Agent on each request</p>
+  <p class="meta">Updated {data['updated_at']} UTC · humans = browsers that ran the page's JavaScript (since 2026-10-05; earlier human counts include non-JS scrapers)</p>
   <h2>Humans</h2>
   <div class="cards">
     <div class="card humans"><strong>{t['human_visitors_today']}</strong> today</div>
@@ -1256,6 +1257,7 @@ def _stats_page(data):
   <div class="cards">
     <div class="card humans"><strong>{t['human_page_views']}</strong> human page views</div>
     <div class="card bots"><strong>{t['bot_page_views']}</strong> bot page views</div>
+    <div class="card"><strong>{t['unverified_hits']}</strong> browser-UA page requests (humans + non-JS scrapers)</div>
     <div class="card humans"><strong>{t['human_preloads']}</strong> human preloads</div>
     <div class="card bots"><strong>{t['bot_preloads']}</strong> bot preloads</div>
     <div class="card humans"><strong>{t['human_searches']}</strong> human searches</div>
@@ -1275,8 +1277,22 @@ def _stats_page(data):
 
 @app.route("/")
 def index():
-    record_event("page_view", path="/", ip=client_ip(), user_agent=client_user_agent())
+    # Only self-declared bots are counted here. Browser-like clients are counted
+    # as human page views by the JS beacon (/hit), which scrapers that don't
+    # execute JavaScript never send.
+    ua = client_user_agent()
+    if is_bot(ua):
+        record_event("page_view", path="/", ip=client_ip(), user_agent=ua)
+    else:
+        record_event("unverified_hit", path="/", kind="unverified")
     return HTML
+
+
+@app.route("/hit", methods=["POST"])
+@limiter.limit("30 per minute")
+def hit():
+    record_event("page_view", path="/", ip=client_ip(), user_agent=client_user_agent())
+    return "", 204
 
 
 @app.route("/stats")

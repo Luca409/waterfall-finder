@@ -94,8 +94,9 @@ def _totals_event(data, event, kind):
     return 0
 
 
-def record(event, path="", ip="", user_agent=None):
+def record(event, path="", ip="", user_agent=None, kind=None):
     today = date.today().isoformat()
+    label = kind
     kind = _kind_for(user_agent, ip)
     with _LOCK:
         data = _load()
@@ -130,7 +131,7 @@ def record(event, path="", ip="", user_agent=None):
             "ts": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "event": event,
             "path": path,
-            "kind": kind or "human",
+            "kind": kind or label or "human",
         })
         del recent[_RECENT_LIMIT:]
 
@@ -207,6 +208,7 @@ def summary():
         "human_preloads": _totals_event(data, "preload", "human"),
         "bot_preloads": _totals_event(data, "preload", "bot"),
         "human_searches": _totals_event(data, "search", "human"),
+        "unverified_hits": totals.get("unverified_hit", 0),
         "searches_done": totals.get("search_done", 0),
         "search_errors": totals.get("search_error", 0),
     }
