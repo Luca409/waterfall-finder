@@ -118,7 +118,9 @@ def record(event, path="", ip="", user_agent=None, kind=None):
             human_events = day.setdefault("events_human", {})
             _bump_event(human_events, event)
 
-        if ip and kind:
+        # A human only counts as a visitor once the JS beacon (page_view) fires;
+        # direct hits on the JSON endpoints with a browser UA don't qualify.
+        if ip and kind and (kind == "bot" or event == "page_view"):
             vh = visitor_hash(ip)
             visitors = day.setdefault(f"visitors_{kind}", {})
             visitors[vh] = visitors.get(vh, 0) + 1
